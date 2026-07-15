@@ -9,6 +9,11 @@ workflows:
       - name: Get Flutter packages
         script: |
           flutter pub get
+      - name: Override Kotlin version
+        script: |
+          cd android
+          sed -i 's/id("org.jetbrains.kotlin.android") version "[^"]*"/id("org.jetbrains.kotlin.android") version "1.9.10"/' settings.gradle.kts
+          cd ..
       - name: Build APK
         script: |
           flutter build apk --debug
