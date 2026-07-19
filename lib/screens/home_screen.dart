@@ -79,7 +79,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: _loading
                 ? const Center(
                     child: CircularProgressIndicator(color: Color(0xFF7C3AED)))
-                : Padding(
+                : SingleChildScrollView(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 24, vertical: 20),
                     child: Column(
@@ -288,4 +288,3 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
-
