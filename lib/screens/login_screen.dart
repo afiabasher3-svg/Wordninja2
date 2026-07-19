@@ -4,6 +4,7 @@ import 'game_screen.dart';
 import '../widgets/otp_card.dart';
 import '../widgets/login_card.dart';
 import '../utils/error_helper.dart';
+import 'forgot_password_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -82,6 +83,12 @@ class _LoginScreenState extends State<LoginScreen>
     });
     try {
       if (_isLogin) {
+        if (!isValidEmail(_emailController.text.trim())) {
+          setState(() {
+            _error = '📧 Please enter a valid email address.';
+          });
+          return;
+        }
         final res = await Supabase.instance.client.auth.signInWithPassword(
           email: _emailController.text.trim(),
           password: _passController.text.trim(),
@@ -107,6 +114,12 @@ class _LoginScreenState extends State<LoginScreen>
           }
         }
       } else {
+        if (!isValidEmail(_emailController.text.trim())) {
+          setState(() {
+            _error = '📧 Please enter a valid email address.';
+          });
+          return;
+        }
         if (_usernameController.text.trim().isEmpty) {
           setState(() {
             _error = '⚠️ Please enter a username.';
@@ -163,38 +176,6 @@ class _LoginScreenState extends State<LoginScreen>
     } catch (e) {
       setState(() {
         _error = '❌ Invalid or expired OTP. Please try again.';
-      });
-    } finally {
-      if (mounted)
-        setState(() {
-          _loading = false;
-        });
-    }
-  }
-
-  Future<void> _forgotPassword() async {
-    if (_emailController.text.trim().isEmpty) {
-      setState(() {
-        _error = '📧 Please enter your email first.';
-      });
-      return;
-    }
-    setState(() {
-      _loading = true;
-      _error = '';
-      _success = '';
-    });
-    try {
-      await Supabase.instance.client.auth.resetPasswordForEmail(
-        _emailController.text.trim(),
-        redirectTo: 'wordninja://reset-password',
-      );
-      setState(() {
-        _success = '📬 Password reset email sent! Check your inbox.';
-      });
-    } catch (e) {
-      setState(() {
-        _error = friendlyError(e.toString());
       });
     } finally {
       if (mounted)
@@ -309,7 +290,11 @@ class _LoginScreenState extends State<LoginScreen>
                                 usernameController: _usernameController,
                                 onSubmit: _submit,
                                 onSwitchMode: _switchMode,
-                                onForgotPassword: _forgotPassword,
+                                onForgotPassword: () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) =>
+                                            const ForgotPasswordScreen())),
                                 onDeleteAccount: _deleteAccount,
                                 onTogglePassword: () => setState(
                                     () => _showPassword = !_showPassword),
