@@ -4,6 +4,7 @@ import '../models/word_tile.dart';
 import '../painters/balloon_painter.dart';
 import '../services/supabase_service.dart';
 import 'login_screen.dart';
+import 'home_screen.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
@@ -18,7 +19,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   List<_Particle> particles = [];
   int score = 0, lives = 3, level = 1;
   bool gameActive = false, gameOver = false;
-  int _tickCount = 0, _spawnInterval = 100;
+  int _tickCount = 0, _spawnInterval = 160;
   int _totalWords = 0, _correctWords = 0;
   DateTime? _gameStart;
   double _wpm = 0, _accuracy = 0;
@@ -166,13 +167,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
       if (_tickCount % 500 == 0 && level < 10) {
         level++;
-        _spawnInterval = max(60, 100 - level * 5);
+        _spawnInterval = max(100, 160 - level * 8);
       }
     });
   }
 
   void _spawnWord() {
     if (!gameActive) return;
+    if (tiles.length >= 4) return;
     final word = normalWords[_random.nextInt(normalWords.length)];
     final x = 20 + _random.nextDouble() * (_screenWidth - 140);
     final color = balloonColors[_random.nextInt(balloonColors.length)];
@@ -186,6 +188,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   void _spawnPowerWord() {
     if (!gameActive) return;
+    if (tiles.length >= 4) return;
     final word = powerWords[_random.nextInt(powerWords.length)];
     final x = 20 + _random.nextDouble() * (_screenWidth - 180);
     setState(() => tiles.add(WordTile(
@@ -215,10 +218,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _endGame() async {
+  void _calculateStats() {
     final elapsed = DateTime.now().difference(_gameStart!).inSeconds;
     _wpm = elapsed > 0 ? (_correctWords / elapsed * 60) : 0;
     _accuracy = _totalWords > 0 ? (_correctWords / _totalWords * 100) : 0;
+  }
+
+  void _endGame() async {
+    _calculateStats();
     setState(() {
       gameActive = false;
       gameOver = true;
@@ -227,66 +234,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     await SupabaseService.saveScore(
         score: score, accuracy: _accuracy, wpm: _wpm);
   }
-
-  // ── Delete Account ──────────────────────────────────────────────
-
-  void _showDeleteAccountDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A2E),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Account Delete?',
-            style: TextStyle(color: Colors.white)),
-        content: const Text(
-            'Aapnar account ebong sob data permanently delete hobe. Sure?',
-            style: TextStyle(color: Colors.white70)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child:
-                const Text('Cancel', style: TextStyle(color: Colors.white54)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _deleteAccount();
-            },
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _deleteAccount() async {
-    try {
-      final user = SupabaseService.client.auth.currentUser;
-      if (user == null) return;
-
-      await SupabaseService.client.from('profiles').delete().eq('id', user.id);
-
-      // Supabase dashboard e "Allow users to delete their own account" ON
-      // thakle nicher line kaj korbe, otherwise Edge Function lagbe
-      await SupabaseService.client.rpc('delete_user');
-
-      await SupabaseService.signOut();
-      if (mounted) {
-        Navigator.pushReplacement(
-            context, MaterialPageRoute(builder: (_) => const LoginScreen()));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('Error: $e'), backgroundColor: Colors.redAccent),
-        );
-      }
-    }
-  }
-
-  // ───────────────────────────────────────────────────────────────
 
   @override
   void dispose() {
@@ -297,188 +244,258 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            // ── Header ──
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return WillPopScope(
+      onWillPop: () async {
+        if (gameActive) {
+          _calculateStats();
+          final quit = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              backgroundColor: const Color(0xFF1A1A2E),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              title: const Text('Quit Game?',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Score: $score',
-                      style:
-                          const TextStyle(fontSize: 18, color: Colors.white)),
-                  Text('Level: $level',
-                      style:
-                          const TextStyle(fontSize: 18, color: Colors.amber)),
-                  Row(children: [
-                    Text('❤️' * lives + '🖤' * (3 - lives),
-                        style: const TextStyle(fontSize: 18)),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      icon: const Icon(Icons.logout,
-                          color: Colors.white38, size: 20),
-                      tooltip: 'Logout',
-                      onPressed: () async {
-                        await SupabaseService.signOut();
-                        if (mounted)
-                          Navigator.pushReplacement(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => const LoginScreen()));
-                      },
+                  const Text('Are you sure you want to quit?',
+                      style: TextStyle(color: Color(0xFF8B8BAD))),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0A14),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.person_remove,
-                          color: Colors.redAccent, size: 20),
-                      tooltip: 'Delete Account',
-                      onPressed: _showDeleteAccountDialog,
-                    ),
-                  ]),
+                    child: Column(children: [
+                      _dialogStatRow('🏆 Score', '$score', Colors.amber),
+                      _dialogStatRow(
+                          '🎯 Accuracy',
+                          '${_accuracy.toStringAsFixed(1)}%',
+                          Colors.greenAccent),
+                      _dialogStatRow(
+                          '⚡ WPM', _wpm.toStringAsFixed(1), Colors.cyanAccent),
+                    ]),
+                  ),
                 ],
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Keep Playing',
+                      style: TextStyle(
+                          color: Color(0xFFC084FC),
+                          fontWeight: FontWeight.bold)),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Quit',
+                      style: TextStyle(
+                          color: Colors.redAccent,
+                          fontWeight: FontWeight.bold)),
+                ),
+              ],
             ),
-
-            // ── Game Area ──
-            Expanded(
-              child: Stack(
-                children: [
-                  // Spikes at top
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    child: CustomPaint(
-                      size: Size(_screenWidth, 50),
-                      painter: SpikesPainter(),
+          );
+          if (quit == true) {
+            _gameLoop.stop();
+            if (mounted) {
+              Navigator.pushReplacement(context,
+                  MaterialPageRoute(builder: (_) => const HomeScreen()));
+            }
+          }
+          return false;
+        }
+        Navigator.pushReplacement(
+            context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+        return false;
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Score: $score',
+                        style:
+                            const TextStyle(fontSize: 18, color: Colors.white)),
+                    Text('Level: $level',
+                        style:
+                            const TextStyle(fontSize: 18, color: Colors.amber)),
+                    Row(children: [
+                      Text('❤️' * lives + '🖤' * (3 - lives),
+                          style: const TextStyle(fontSize: 18)),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.home_rounded,
+                            color: Colors.white38, size: 20),
+                        onPressed: () => Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const HomeScreen())),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.logout,
+                            color: Colors.white38, size: 20),
+                        onPressed: () async {
+                          await SupabaseService.signOut();
+                          if (mounted) {
+                            Navigator.pushReplacement(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) => const LoginScreen()));
+                          }
+                        },
+                      ),
+                    ]),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Stack(
+                  children: [
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: CustomPaint(
+                        size: Size(_screenWidth, 50),
+                        painter: SpikesPainter(),
+                      ),
                     ),
-                  ),
-
-                  // Particles
-                  ...particles.map((p) => Positioned(
-                        left: p.x,
-                        top: p.y,
-                        child: Opacity(
-                          opacity: p.life.clamp(0.0, 1.0),
-                          child: p.isSpike
-                              ? Transform.rotate(
-                                  angle: p.life * 5,
-                                  child: Container(
-                                    width: 8,
-                                    height: 8,
+                    ...particles.map((p) => Positioned(
+                          left: p.x,
+                          top: p.y,
+                          child: Opacity(
+                            opacity: p.life.clamp(0.0, 1.0),
+                            child: p.isSpike
+                                ? Transform.rotate(
+                                    angle: p.life * 5,
+                                    child: Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: BoxDecoration(
+                                            color: p.color,
+                                            shape: BoxShape.rectangle)))
+                                : Container(
+                                    width: 7,
+                                    height: 7,
                                     decoration: BoxDecoration(
-                                      color: p.color,
-                                      shape: BoxShape.rectangle,
-                                    ),
-                                  ),
-                                )
-                              : Container(
-                                  width: 7,
-                                  height: 7,
-                                  decoration: BoxDecoration(
-                                    color: p.color,
-                                    shape: BoxShape.circle,
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: p.color.withOpacity(0.6),
-                                        blurRadius: 4,
-                                      )
-                                    ],
-                                  ),
-                                ),
-                        ),
-                      )),
-
-                  // Balloons
-                  ...tiles.map((tile) => Positioned(
-                      left: tile.x, top: tile.y, child: _buildBalloon(tile))),
-
-                  // Start / Game Over overlay
-                  if (!gameActive)
-                    Container(
-                      color: Colors.black54,
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.all(28),
-                          margin: const EdgeInsets.symmetric(horizontal: 32),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1A1A2E),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: Colors.white24),
+                                        color: p.color,
+                                        shape: BoxShape.circle,
+                                        boxShadow: [
+                                          BoxShadow(
+                                              color: p.color.withOpacity(0.6),
+                                              blurRadius: 4)
+                                        ])),
                           ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(gameOver ? 'Game Over! 💀' : 'Word Ninja 🎯',
-                                  style: const TextStyle(
-                                      fontSize: 28,
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold)),
-                              const SizedBox(height: 10),
-                              if (gameOver) ...[
-                                const Divider(color: Colors.white24),
-                                const SizedBox(height: 8),
-                                _statRow('🏆 Score', '$score', Colors.amber),
-                                _statRow(
-                                    '🎯 Accuracy',
-                                    '${_accuracy.toStringAsFixed(1)}%',
-                                    Colors.greenAccent),
-                                _statRow('⚡ WPM', _wpm.toStringAsFixed(1),
-                                    Colors.cyanAccent),
-                                const SizedBox(height: 8),
-                              ],
-                              const SizedBox(height: 16),
-                              ElevatedButton(
-                                onPressed: startGame,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.deepPurple,
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 40, vertical: 14),
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12)),
+                        )),
+                    ...tiles.map((tile) => Positioned(
+                        left: tile.x, top: tile.y, child: _buildBalloon(tile))),
+                    if (!gameActive)
+                      Container(
+                        color: Colors.black54,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.all(28),
+                            margin: const EdgeInsets.symmetric(horizontal: 32),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1A1A2E),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                    gameOver
+                                        ? 'Game Over! 💀'
+                                        : 'Word Ninja 🎯',
+                                    style: const TextStyle(
+                                        fontSize: 28,
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 10),
+                                if (gameOver) ...[
+                                  const Divider(color: Colors.white24),
+                                  const SizedBox(height: 8),
+                                  _statRow('🏆 Score', '$score', Colors.amber),
+                                  _statRow(
+                                      '🎯 Accuracy',
+                                      '${_accuracy.toStringAsFixed(1)}%',
+                                      Colors.greenAccent),
+                                  _statRow('⚡ WPM', _wpm.toStringAsFixed(1),
+                                      Colors.cyanAccent),
+                                  const SizedBox(height: 8),
+                                ],
+                                const SizedBox(height: 16),
+                                ElevatedButton(
+                                  onPressed: startGame,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.deepPurple,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 40, vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                  ),
+                                  child: Text(
+                                      gameOver ? 'Play Again' : 'Start Game',
+                                      style: const TextStyle(fontSize: 18)),
                                 ),
-                                child: Text(
-                                    gameOver ? 'Play Again' : 'Start Game',
-                                    style: const TextStyle(fontSize: 18)),
-                              ),
-                            ],
+                                const SizedBox(height: 8),
+                                TextButton(
+                                  onPressed: () => Navigator.pushReplacement(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => const HomeScreen())),
+                                  child: const Text('🏠 Home',
+                                      style: TextStyle(
+                                          color: Colors.white54, fontSize: 14)),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
-              ),
-            ),
-
-            // ── Text Input ──
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              child: TextField(
-                controller: _controller,
-                enabled: gameActive,
-                autofocus: true,
-                style: const TextStyle(color: Colors.white, fontSize: 18),
-                decoration: InputDecoration(
-                  hintText: 'Type here...',
-                  hintStyle: const TextStyle(color: Colors.white38),
-                  filled: true,
-                  fillColor: const Color(0xFF1A1A2E),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Colors.white24)),
-                  enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Colors.white24)),
-                  focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Colors.deepPurple)),
+                  ],
                 ),
-                onChanged: (_) => _checkWord(),
               ),
-            ),
-          ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: TextField(
+                  controller: _controller,
+                  enabled: gameActive,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                  decoration: InputDecoration(
+                    hintText: 'Type here...',
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A2E),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Colors.white24)),
+                    enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Colors.white24)),
+                    focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Colors.deepPurple)),
+                  ),
+                  onChanged: (_) => _checkWord(),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -495,6 +512,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           Text(value,
               style: TextStyle(
                   color: color, fontSize: 16, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _dialogStatRow(String label, String value, Color color) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 13)),
+          Text(value,
+              style: TextStyle(
+                  color: color, fontSize: 14, fontWeight: FontWeight.bold)),
         ],
       ),
     );
@@ -518,10 +551,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                 color: tile.balloonColor.withOpacity(0.5),
                 boxShadow: [
                   BoxShadow(
-                    color: tile.balloonColor,
-                    blurRadius: 20,
-                    spreadRadius: 5,
-                  )
+                      color: tile.balloonColor, blurRadius: 20, spreadRadius: 5)
                 ],
               ),
             ),
@@ -560,7 +590,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                 : Colors.greenAccent,
                             fontSize: tile.isPower ? 17 : 15,
                             fontWeight: FontWeight.bold,
-                            letterSpacing: 1.2,
                             shadows: [
                               Shadow(
                                   blurRadius: 8,
@@ -578,7 +607,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                             color: Colors.white,
                             fontSize: tile.isPower ? 17 : 15,
                             shadows: const [
-                              Shadow(blurRadius: 4, color: Colors.black87),
+                              Shadow(blurRadius: 4, color: Colors.black87)
                             ],
                           ),
                         ),
