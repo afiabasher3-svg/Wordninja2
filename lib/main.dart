@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:app_links/app_links.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/reset_password_screen.dart';
@@ -23,9 +24,27 @@ class WordNinjaApp extends StatefulWidget {
 }
 
 class _WordNinjaAppState extends State<WordNinjaApp> {
+  late final AppLinks _appLinks;
+
   @override
   void initState() {
     super.initState();
+    _initDeepLinks();
+    _initSupabaseAuth();
+  }
+
+  void _initDeepLinks() {
+    _appLinks = AppLinks();
+    _appLinks.uriLinkStream.listen((uri) {
+      if (uri.scheme == 'wordninja') {
+        navigatorKey.currentState?.pushReplacement(
+          MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
+        );
+      }
+    });
+  }
+
+  void _initSupabaseAuth() {
     Supabase.instance.client.auth.onAuthStateChange.listen((data) {
       final event = data.event;
       if (event == AuthChangeEvent.passwordRecovery) {
