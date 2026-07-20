@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'game_screen.dart';
+import 'home_screen.dart';
 import '../widgets/otp_card.dart';
 import '../widgets/login_card.dart';
 import '../utils/error_helper.dart';
@@ -110,7 +110,7 @@ class _LoginScreenState extends State<LoginScreen>
           }
           if (mounted) {
             Navigator.pushReplacement(
-                context, MaterialPageRoute(builder: (_) => const GameScreen()));
+                context, MaterialPageRoute(builder: (_) => const HomeScreen()));
           }
         }
       } else {
@@ -170,7 +170,7 @@ class _LoginScreenState extends State<LoginScreen>
         });
         if (mounted) {
           Navigator.pushReplacement(
-              context, MaterialPageRoute(builder: (_) => const GameScreen()));
+              context, MaterialPageRoute(builder: (_) => const HomeScreen()));
         }
       }
     } catch (e) {
