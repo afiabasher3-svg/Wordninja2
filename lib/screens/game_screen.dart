@@ -343,15 +343,84 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                 builder: (_) => const HomeScreen())),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.logout,
+                        icon: const Icon(Icons.home_rounded,
                             color: Colors.white38, size: 20),
                         onPressed: () async {
-                          await SupabaseService.signOut();
-                          if (mounted) {
+                          if (gameActive) {
+                            _calculateStats();
+                            final quit = await showDialog<bool>(
+                              context: context,
+                              builder: (_) => AlertDialog(
+                                backgroundColor: const Color(0xFF1A1A2E),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16)),
+                                title: const Text('Quit Game?',
+                                    style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold)),
+                                content: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('Are you sure you want to quit?',
+                                        style: TextStyle(
+                                            color: Color(0xFF8B8BAD))),
+                                    const SizedBox(height: 12),
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF0A0A14),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Column(children: [
+                                        _dialogStatRow(
+                                            '🏆 Score', '$score', Colors.amber),
+                                        _dialogStatRow(
+                                            '🎯 Accuracy',
+                                            '${_accuracy.toStringAsFixed(1)}%',
+                                            Colors.greenAccent),
+                                        _dialogStatRow(
+                                            '⚡ WPM',
+                                            _wpm.toStringAsFixed(1),
+                                            Colors.cyanAccent),
+                                      ]),
+                                    ),
+                                  ],
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(context, false),
+                                    child: const Text('Keep Playing',
+                                        style: TextStyle(
+                                            color: Color(0xFFC084FC),
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(context, true),
+                                    child: const Text('Quit',
+                                        style: TextStyle(
+                                            color: Colors.redAccent,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (quit == true) {
+                              _gameLoop.stop();
+                              if (mounted) {
+                                Navigator.pushReplacement(
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) => const HomeScreen()));
+                              }
+                            }
+                          } else {
                             Navigator.pushReplacement(
                                 context,
                                 MaterialPageRoute(
-                                    builder: (_) => const LoginScreen()));
+                                    builder: (_) => const HomeScreen()));
                           }
                         },
                       ),
