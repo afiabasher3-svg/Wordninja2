@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'banner_widget.dart';
 import 'gradient_button.dart';
-import 'package:wordninja/widgets/banner_widget.dart';
-import 'package:wordninja/widgets/gradient_button.dart';
 
 class OtpCard extends StatelessWidget {
   final TextEditingController otpController;
