@@ -92,7 +92,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       await Supabase.instance.client.auth.verifyOTP(
         email: _emailController.text.trim(),
         token: otp,
-        type: OtpType.magiclink,
+        type: OtpType.email,
       );
       if (mounted) {
         Navigator.pushReplacement(context,
