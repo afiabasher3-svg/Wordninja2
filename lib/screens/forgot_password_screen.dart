@@ -1,420 +1,850 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:math';
+import '../models/word_tile.dart';
+import '../models/word_note.dart';
+import '../models/topic.dart';
+import '../painters/balloon_painter.dart';
+import '../services/supabase_service.dart';
+import '../painters/topic_background.dart';
 import 'login_screen.dart';
-import 'reset_password_screen.dart';
-import '../utils/error_helper.dart';
+import 'home_screen.dart';
+import 'result_screen.dart';
 
-class ForgotPasswordScreen extends StatefulWidget {
-  const ForgotPasswordScreen({super.key});
+class GameScreen extends StatefulWidget {
+  final String mode;
+  final List<Topic> topics;
+
+  /// Part 9: when set, the game should be seeded from these words
+  /// instead of (or in addition to) the normal topic pool.
+  final List<WordNote>? reviewWords;
+
+  const GameScreen({
+    super.key,
+    required this.mode,
+    required this.topics,
+    this.reviewWords,
+  });
+
+  // Convenience accessors so the rest of the screen reads naturally when
+  // one or several topics are in play.
+  List<int> get topicIds => topics.map((t) => t.id).toList();
+  Color get themeColor => topics.first.themeColor;
+  Color get bgColor => topics.first.bgColor;
+  String get topicName => topics.map((t) => t.name).join(' + ');
+  String get topicEmoji => topics.map((t) => t.emoji).join(' ');
+
+  /// Primary topic id — used for session tracking / result screen when a
+  /// single representative topic id is needed (e.g. multi-topic sessions
+  /// are recorded under their first topic).
+  int get topicId => topics.first.id;
 
   @override
-  State<ForgotPasswordScreen> createState() => _ForgotPasswordScreenState();
+  State<GameScreen> createState() => _GameScreenState();
 }
 
-class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
-  final _emailController = TextEditingController();
-  final _otpController = TextEditingController();
-  bool _loading = false;
-  bool _otpSent = false;
-  String _error = '';
-  String _success = '';
+class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
+  final _controller = TextEditingController();
+  final _random = Random();
+  List<WordTile> tiles = [];
+  List<_Particle> particles = [];
+  int score = 0, lives = 3, level = 1;
+  bool gameActive = false, gameOver = false;
+  int _tickCount = 0, _spawnInterval = 160;
+  int _totalAttempts = 0, _correctWords = 0;
+  DateTime? _gameStart;
+  double _wpm = 0, _accuracy = 0;
+  bool _flashRed = false;
+  List<Map<String, dynamic>> _wordPool = [];
 
-  static const _bg = Color(0xFF0A0A14);
-  static const _surface = Color(0xFF12121F);
-  static const _card = Color(0xFF1A1A2E);
-  static const _border = Color(0xFF2A2A45);
-  static const _purple = Color(0xFF7C3AED);
-  static const _purpleLight = Color(0xFF9D5CF6);
-  static const _accent = Color(0xFFC084FC);
-  static const _textPrimary = Color(0xFFF1F0FF);
-  static const _textSecondary = Color(0xFF8B8BAD);
+  // --- Vocabulary Notebook session tracking (Part 3) ---
+  final List<WordNote> _sessionWords = [];
+  final Set<String> _sessionWordKeys = {}; // de-dup guard
+  final Stopwatch _sessionStopwatch = Stopwatch();
+
+  late AnimationController _gameLoop;
+
+  @override
+  void initState() {
+    super.initState();
+    _gameLoop = AnimationController(
+      vsync: this,
+      duration: const Duration(days: 1),
+    )..addListener(_tick);
+    _loadWords();
+  }
+
+  Future<void> _loadWords() async {
+    final data = await SupabaseService.client
+        .from('words')
+        .select()
+        .inFilter('topic_id', widget.topicIds)
+        .eq('difficulty', widget.mode);
+    setState(() {
+      _wordPool = List<Map<String, dynamic>>.from(data);
+    });
+  }
+
+  /// Looks up a word's own topic so multi-topic games can color/tag each
+  /// balloon by the topic it actually belongs to.
+  Topic _topicForWord(Map<String, dynamic> wordData) {
+    final id = wordData['topic_id'];
+    return widget.topics
+        .firstWhere((t) => t.id == id, orElse: () => widget.topics.first);
+  }
+
+  // Synonym balloons unlock once the player has leveled up a bit, on top of
+  // the existing advanced-mode behavior.
+  static const int _synonymUnlockLevel = 3;
+  bool get _synonymsActive => widget.mode == 'advanced';
+
+  /// status must be one of: 'popped' | 'missed' | 'synonym'
+  void _trackSessionWord({
+    required String word,
+    String? meaning,
+    String? pronunciation,
+    int? topicId,
+    required String status,
+  }) {
+    final note = WordNote(
+      word: word,
+      meaning: meaning ?? '',
+      pronunciation: pronunciation ?? '',
+      topicId: topicId ?? widget.topicId,
+      mode: widget.mode,
+      status: status,
+    );
+
+    // Avoid duplicate entries for the same word+topic+mode within one session.
+    if (_sessionWordKeys.add(note.sessionKey)) {
+      _sessionWords.add(note);
+    } else {
+      // Word already tracked this session — upgrade its status if the
+      // new interaction is "better" (popped/synonym should win over missed).
+      final idx =
+          _sessionWords.indexWhere((w) => w.sessionKey == note.sessionKey);
+      if (idx != -1 &&
+          _sessionWords[idx].status == 'missed' &&
+          status != 'missed') {
+        _sessionWords[idx] = _sessionWords[idx].copyWith(status: status);
+      }
+    }
+  }
+
+  void startGame() {
+    if (_wordPool.isEmpty) return;
+    setState(() {
+      tiles.clear();
+      particles.clear();
+      score = 0;
+      lives = 3;
+      level = 1;
+      gameActive = true;
+      gameOver = false;
+      _tickCount = 0;
+      _totalAttempts = 0;
+      _correctWords = 0;
+      _sessionWords.clear();
+      _sessionWordKeys.clear();
+      _gameStart = DateTime.now();
+      _controller.clear();
+      _flashRed = false;
+    });
+    _sessionStopwatch
+      ..reset()
+      ..start();
+    _gameLoop.forward(from: 0);
+    _spawnWord();
+  }
+
+  double get _screenHeight => MediaQuery.of(context).size.height;
+  double get _screenWidth => MediaQuery.of(context).size.width;
+
+  void _spawnParticles(double x, double y, Color color,
+      {bool isSpike = false}) {
+    for (int i = 0; i < 12; i++) {
+      final angle = _random.nextDouble() * 2 * pi;
+      final speed = 2 + _random.nextDouble() * 4;
+      particles.add(_Particle(
+        x: x,
+        y: y,
+        vx: cos(angle) * speed,
+        vy: sin(angle) * speed,
+        color: isSpike ? Colors.redAccent : color,
+        life: 1.0,
+        isSpike: isSpike,
+      ));
+    }
+  }
+
+  void _tick() {
+    if (!gameActive) return;
+    _tickCount++;
+    setState(() {
+      // Speed climbs faster with each level so higher levels feel
+      // noticeably more intense, not just marginally quicker.
+      double speed = 0.7 + (level * 0.10) + (level * level * 0.005);
+      for (var t in tiles) {
+        if (!t.isPopping) t.y -= t.isPower ? speed * 0.85 : speed;
+      }
+
+      for (var p in particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.15;
+        p.life -= 0.04;
+      }
+      particles.removeWhere((p) => p.life <= 0);
+
+      tiles.removeWhere((t) {
+        if (t.isPopping) return false;
+        if (t.y < 55) {
+          lives--;
+          _spawnParticles(t.x + 45, 60, t.balloonColor, isSpike: true);
+
+          // session words এ missed হিসেবে যোগ করো
+          final wordData = _wordPool.firstWhere((w) => w['word'] == t.word,
+              orElse: () => {});
+          _trackSessionWord(
+            word: t.word,
+            meaning: wordData['meaning'] as String?,
+            pronunciation: wordData['pronunciation'] as String?,
+            topicId: wordData['topic_id'] as int?,
+            status: 'missed',
+          );
+
+          if (lives <= 0) _endGame();
+          return true;
+        }
+        return false;
+      });
+
+      String typed = _controller.text.toLowerCase().trim();
+      for (var t in tiles) {
+        t.isActive = typed.isNotEmpty && t.word.startsWith(typed);
+      }
+
+      if (_tickCount % _spawnInterval == 0) {
+        _spawnWord();
+      }
+      if (_tickCount % 500 == 0 && level < 15) {
+        level++;
+        _spawnInterval = max(70, 160 - level * 8);
+      }
+    });
+  }
+
+  void _spawnWord() {
+    if (!gameActive) return;
+    if (tiles.length >= 4) return;
+    if (_wordPool.isEmpty) return;
+
+    final wordData = _wordPool[_random.nextInt(_wordPool.length)];
+    final word = wordData['word'] as String;
+
+    // একই word দুইবার না আসে
+    if (tiles.any((t) => t.word == word)) return;
+
+    final x = 20 + _random.nextDouble() * (_screenWidth - 140);
+    final topic = _topicForWord(wordData);
+
+    setState(() => tiles.add(WordTile(
+          word: word,
+          x: x,
+          y: _screenHeight - 150,
+          balloonColor: topic.themeColor,
+          isPower: false,
+        )));
+  }
+
+  void _spawnSynonymBalloon(String synonym) {
+    if (!mounted) return;
+    final x = 20 + _random.nextDouble() * (_screenWidth - 140);
+    setState(() {
+      tiles.add(WordTile(
+        word: synonym,
+        x: x,
+        y: _screenHeight - 150,
+        balloonColor: Colors.amber,
+        isPower: true,
+      ));
+    });
+  }
+
+  void _checkWord() {
+    final typed = _controller.text.toLowerCase().trim();
+    if (typed.isEmpty) return;
+
+    final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
+
+    if (match.isNotEmpty) {
+      final tile = match.first;
+      _spawnParticles(tile.x + 45, tile.y + 50, tile.balloonColor);
+
+      // session words এ track করো (pool এ থাকুক বা না থাকুক — synonym balloon
+      // এর word pool এ নাও থাকতে পারে, সেক্ষেত্রে meaning/pronunciation ফাঁকা যাবে)
+      final wordData =
+          _wordPool.firstWhere((w) => w['word'] == tile.word, orElse: () => {});
+      _trackSessionWord(
+        word: tile.word,
+        meaning: wordData['meaning'] as String?,
+        pronunciation: wordData['pronunciation'] as String?,
+        topicId: wordData['topic_id'] as int?,
+        status: tile.isPower ? 'synonym' : 'popped',
+      );
+
+      setState(() {
+        tile.isPopping = true;
+        score += tile.isPower ? typed.length * level * 3 : typed.length * level;
+        _correctWords++;
+        _controller.clear();
+      });
+
+      // Synonym balloon spawns once unlocked (advanced mode, or any mode
+      // after leveling up)
+      if (_synonymsActive && !tile.isPower) {
+        final original = _wordPool.firstWhere((w) => w['word'] == tile.word,
+            orElse: () => {});
+        if (original.isNotEmpty) {
+          final synonyms = List<String>.from(original['synonyms'] ?? []);
+          if (synonyms.isNotEmpty) {
+            final synonym = synonyms[_random.nextInt(synonyms.length)];
+            Future.delayed(const Duration(milliseconds: 500), () {
+              _spawnSynonymBalloon(synonym);
+            });
+          }
+        }
+      }
+
+      Future.delayed(const Duration(milliseconds: 400),
+          () => setState(() => tiles.remove(tile)));
+    }
+  }
+
+  void _onSubmitted(String value) {
+    final typed = value.toLowerCase().trim();
+    if (typed.isEmpty) return;
+
+    final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
+
+    if (match.isEmpty) {
+      // ভুল word — red flash + clear
+      _totalAttempts++;
+      setState(() => _flashRed = true);
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted) setState(() => _flashRed = false);
+      });
+      _controller.clear();
+    }
+  }
+
+  void _calculateStats() {
+    final elapsed = DateTime.now().difference(_gameStart!).inSeconds;
+    _wpm = elapsed > 0 ? (_correctWords / elapsed * 60) : 0;
+    _accuracy = (_totalAttempts + _correctWords) > 0
+        ? (_correctWords / (_totalAttempts + _correctWords) * 100)
+        : 0;
+  }
+
+  Future<void> _endGame() async {
+    _calculateStats();
+    setState(() {
+      gameActive = false;
+      gameOver = true;
+    });
+    _gameLoop.stop();
+    _sessionStopwatch.stop();
+
+    await SupabaseService.saveScore(
+        score: score, accuracy: _accuracy, wpm: _wpm);
+
+    // Part 8: save the session's words to Supabase before navigating.
+    // Non-fatal if this fails — don't block the player from seeing
+    // their results just because the notebook sync failed.
+    try {
+      if (_sessionWords.isNotEmpty) {
+        await SupabaseService.saveSessionWords(_sessionWords);
+      }
+    } catch (_) {
+      // TODO: hook into your existing ErrorHelper if you want visibility.
+    }
+
+    if (!mounted) return;
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ResultScreen(
+          topicEmoji: widget.topicEmoji,
+          topicName: widget.topicName,
+          topicId: widget.topicId,
+          mode: widget.mode,
+          finalScore: score,
+          accuracy: _accuracy,
+          wpm: _wpm,
+          levelReached: level,
+          wordsPopped: _sessionWords.where((w) => w.status == 'popped').length,
+          wordsMissed: _sessionWords.where((w) => w.status == 'missed').length,
+          synonymsCompleted:
+              _sessionWords.where((w) => w.status == 'synonym').length,
+          timePlayed: _sessionStopwatch.elapsed,
+          sessionWords: _sessionWords,
+        ),
+      ),
+    );
+  }
 
   @override
   void dispose() {
-    _emailController.dispose();
-    _otpController.dispose();
+    _gameLoop.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
-  Future<void> _sendOtp() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) {
-      setState(() {
-        _error = '📧 Please enter your email.';
-      });
-      return;
-    }
-    if (!isValidEmail(email)) {
-      setState(() {
-        _error = '📧 Please enter a valid email address.';
-      });
-      return;
-    }
-    setState(() {
-      _loading = true;
-      _error = '';
-      _success = '';
-    });
-    try {
-      await Supabase.instance.client.auth.signInWithOtp(
-        email: email,
-        shouldCreateUser: false,
+  Future<bool> _onWillPop() async {
+    if (gameActive) {
+      _calculateStats();
+      final quit = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A2E),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Quit Game?',
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Are you sure you want to quit?',
+                  style: TextStyle(color: Color(0xFF8B8BAD))),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A0A14),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(children: [
+                  _dialogStatRow('🏆 Score', '$score', Colors.amber),
+                  _dialogStatRow('🎯 Accuracy',
+                      '${_accuracy.toStringAsFixed(1)}%', Colors.greenAccent),
+                  _dialogStatRow(
+                      '⚡ WPM', _wpm.toStringAsFixed(1), Colors.cyanAccent),
+                ]),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep Playing',
+                  style: TextStyle(
+                      color: Color(0xFFC084FC), fontWeight: FontWeight.bold)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Quit',
+                  style: TextStyle(
+                      color: Colors.redAccent, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
       );
-      setState(() {
-        _otpSent = true;
-        _success = '✅ OTP sent! Check your email.';
-      });
-    } catch (e) {
-      setState(() {
-        _error = friendlyError(e.toString());
-      });
-    } finally {
-      if (mounted)
-        setState(() {
-          _loading = false;
-        });
-    }
-  }
-
-  Future<void> _verifyOtp() async {
-    final otp = _otpController.text.trim();
-    if (otp.isEmpty || otp.length < 6) {
-      setState(() {
-        _error = '⚠️ Please enter the 6-digit OTP.';
-      });
-      return;
-    }
-    setState(() {
-      _loading = true;
-      _error = '';
-    });
-    try {
-      await Supabase.instance.client.auth.verifyOTP(
-        email: _emailController.text.trim(),
-        token: otp,
-        type: OtpType.email,
-      );
-      if (mounted) {
-        Navigator.pushReplacement(context,
-            MaterialPageRoute(builder: (_) => const ResetPasswordScreen()));
+      if (quit == true) {
+        _gameLoop.stop();
+        if (mounted) {
+          Navigator.pushReplacement(
+              context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+        }
       }
-    } catch (e) {
-      setState(() {
-        _error = '❌ Invalid or expired OTP. Please try again.';
-      });
-    } finally {
-      if (mounted)
-        setState(() {
-          _loading = false;
-        });
+      return false;
     }
+    Navigator.pushReplacement(
+        context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+    return false;
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _bg,
-      body: Stack(
-        children: [
-          Positioned(
-              top: -120,
-              left: -80,
-              child: Container(
-                  width: 380,
-                  height: 380,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _purple.withOpacity(0.25)))),
-          Positioned(
-              bottom: -100,
-              right: -60,
-              child: Container(
-                  width: 300,
-                  height: 300,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _accent.withOpacity(0.15)))),
-          SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // Header
-                    Column(children: [
-                      Container(
-                        width: 80,
-                        height: 80,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _card,
-                          border: Border.all(
-                              color: _purple.withOpacity(0.6), width: 2),
-                          boxShadow: [
-                            BoxShadow(
-                                color: _purple.withOpacity(0.35),
-                                blurRadius: 24,
-                                spreadRadius: 2)
-                          ],
+    return WillPopScope(
+      onWillPop: _onWillPop,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            TopicBackground(topics: widget.topics),
+            if (_flashRed) Container(color: Colors.red.withOpacity(0.15)),
+            SafeArea(
+              child: Column(
+                children: [
+                  // Top bar
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Score: $score',
+                            style: const TextStyle(
+                                fontSize: 16, color: Colors.white)),
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: Text(
+                              '${widget.topicEmoji} ${widget.topicName}',
+                              style: TextStyle(
+                                  fontSize: 13, color: widget.themeColor),
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
                         ),
-                        child: const Center(
-                            child: Text('🔐', style: TextStyle(fontSize: 36))),
-                      ),
-                      const SizedBox(height: 16),
-                      ShaderMask(
-                        shaderCallback: (bounds) => const LinearGradient(
-                                colors: [_purpleLight, _accent])
-                            .createShader(bounds),
-                        child: const Text('Forgot Password',
-                            style: TextStyle(
-                                fontSize: 28,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                                letterSpacing: 0.5)),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _otpSent
-                            ? 'Enter the OTP sent to your email'
-                            : 'Enter your email to receive an OTP',
-                        style: const TextStyle(
-                            color: _textSecondary, fontSize: 14),
-                        textAlign: TextAlign.center,
-                      ),
-                    ]),
-                    const SizedBox(height: 36),
-
-                    // Card
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: _surface,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: _border),
-                        boxShadow: [
-                          BoxShadow(
-                              color: Colors.black.withOpacity(0.4),
-                              blurRadius: 32,
-                              offset: const Offset(0, 8))
-                        ],
-                      ),
-                      child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (!_otpSent) ...[
-                              // Email field
-                              TextField(
-                                controller: _emailController,
-                                keyboardType: TextInputType.emailAddress,
-                                style: const TextStyle(
-                                    color: _textPrimary, fontSize: 15),
-                                cursorColor: _purpleLight,
-                                decoration: InputDecoration(
-                                  hintText: 'Email',
-                                  hintStyle: const TextStyle(
-                                      color: _textSecondary, fontSize: 14),
-                                  prefixIcon: const Icon(Icons.email_outlined,
-                                      color: _textSecondary, size: 20),
-                                  filled: true,
-                                  fillColor: _card,
-                                  contentPadding: const EdgeInsets.symmetric(
-                                      vertical: 14, horizontal: 16),
-                                  border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide:
-                                          const BorderSide(color: _border)),
-                                  enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide:
-                                          const BorderSide(color: _border)),
-                                  focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: const BorderSide(
-                                          color: _purple, width: 1.5)),
-                                ),
-                              ),
-                            ] else ...[
-                              // OTP field
-                              Text(
-                                  'OTP sent to: ${_emailController.text.trim()}',
-                                  style: const TextStyle(
-                                      color: _textSecondary, fontSize: 13),
-                                  textAlign: TextAlign.center),
-                              const SizedBox(height: 16),
-                              TextField(
-                                controller: _otpController,
-                                keyboardType: TextInputType.number,
-                                textAlign: TextAlign.center,
-                                maxLength: 6,
-                                style: const TextStyle(
-                                    color: _textPrimary,
-                                    fontSize: 28,
-                                    letterSpacing: 10,
-                                    fontWeight: FontWeight.bold),
-                                decoration: InputDecoration(
-                                  hintText: '------',
-                                  hintStyle: const TextStyle(
-                                      color: _textSecondary, letterSpacing: 8),
-                                  counterText: '',
-                                  filled: true,
-                                  fillColor: _card,
-                                  border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide:
-                                          const BorderSide(color: _border)),
-                                  enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide:
-                                          const BorderSide(color: _border)),
-                                  focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: const BorderSide(
-                                          color: _purple, width: 1.5)),
-                                ),
-                              ),
-                            ],
-
-                            if (_error.isNotEmpty) ...[
-                              const SizedBox(height: 16),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 14, vertical: 12),
-                                decoration: BoxDecoration(
-                                    color: Colors.redAccent.withOpacity(0.10),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                        color: Colors.redAccent
-                                            .withOpacity(0.35))),
-                                child: Row(children: [
-                                  const Icon(Icons.warning_amber_rounded,
-                                      color: Color(0xFFFF8A8A), size: 18),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                      child: Text(_error,
-                                          style: const TextStyle(
-                                              color: Color(0xFFFF8A8A),
-                                              fontSize: 13,
-                                              height: 1.45))),
-                                ]),
-                              ),
-                            ],
-
-                            if (_success.isNotEmpty) ...[
-                              const SizedBox(height: 16),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 14, vertical: 12),
-                                decoration: BoxDecoration(
-                                    color: Colors.greenAccent.withOpacity(0.08),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                        color: Colors.greenAccent
-                                            .withOpacity(0.30))),
-                                child: Row(children: [
-                                  const Icon(Icons.check_circle_outline_rounded,
-                                      color: Color(0xFF6EE7B7), size: 18),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                      child: Text(_success,
-                                          style: const TextStyle(
-                                              color: Color(0xFF6EE7B7),
-                                              fontSize: 13,
-                                              height: 1.45))),
-                                ]),
-                              ),
-                            ],
-
-                            const SizedBox(height: 20),
-
-                            // Button
-                            SizedBox(
-                              height: 50,
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(13),
-                                  gradient: _loading
-                                      ? null
-                                      : const LinearGradient(
-                                          colors: [_purple, Color(0xFF9D3AED)],
-                                          begin: Alignment.topLeft,
-                                          end: Alignment.bottomRight),
-                                  color: _loading ? _card : null,
-                                  boxShadow: _loading
-                                      ? null
-                                      : [
-                                          BoxShadow(
-                                              color: _purple.withOpacity(0.45),
-                                              blurRadius: 16,
-                                              offset: const Offset(0, 4))
-                                        ],
-                                ),
-                                child: ElevatedButton(
-                                  onPressed: _loading
-                                      ? null
-                                      : (_otpSent ? _verifyOtp : _sendOtp),
-                                  style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.transparent,
-                                      shadowColor: Colors.transparent,
-                                      disabledBackgroundColor:
-                                          Colors.transparent,
-                                      shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(13))),
-                                  child: _loading
-                                      ? const SizedBox(
-                                          width: 22,
-                                          height: 22,
-                                          child: CircularProgressIndicator(
-                                              color: _purpleLight,
-                                              strokeWidth: 2.5))
-                                      : Text(
-                                          _otpSent
-                                              ? 'Verify OTP ✓'
-                                              : 'Send OTP 📧',
-                                          style: const TextStyle(
-                                              fontSize: 15,
-                                              fontWeight: FontWeight.w700,
-                                              color: Colors.white,
-                                              letterSpacing: 0.4)),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-
-                            if (_otpSent)
-                              TextButton(
-                                onPressed: _loading
-                                    ? null
-                                    : () => setState(() {
-                                          _otpSent = false;
-                                          _error = '';
-                                          _success = '';
-                                          _otpController.clear();
-                                        }),
-                                child: const Text('← Change Email',
-                                    style: TextStyle(color: _accent)),
-                              ),
-
-                            TextButton(
-                              onPressed: () => Navigator.pushReplacement(
-                                  context,
-                                  MaterialPageRoute(
-                                      builder: (_) => const LoginScreen())),
-                              child: const Text('← Back to Login',
-                                  style: TextStyle(color: _accent)),
-                            ),
-                          ]),
+                        Row(children: [
+                          Text('❤️' * lives + '🖤' * (3 - lives),
+                              style: const TextStyle(fontSize: 16)),
+                          const SizedBox(width: 4),
+                          IconButton(
+                            icon: const Icon(Icons.home_rounded,
+                                color: Colors.white38, size: 20),
+                            onPressed: () async => await _onWillPop(),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.logout,
+                                color: Colors.white38, size: 20),
+                            onPressed: () async {
+                              await SupabaseService.signOut();
+                              if (mounted) {
+                                Navigator.pushReplacement(
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) => const LoginScreen()));
+                              }
+                            },
+                          ),
+                        ]),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+
+                  // Game area
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        // Spikes
+                        Positioned(
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          child: CustomPaint(
+                            size: Size(_screenWidth, 50),
+                            painter: SpikesPainter(),
+                          ),
+                        ),
+
+                        // Particles
+                        ...particles.map((p) => Positioned(
+                              left: p.x,
+                              top: p.y,
+                              child: Opacity(
+                                opacity: p.life.clamp(0.0, 1.0),
+                                child: p.isSpike
+                                    ? Transform.rotate(
+                                        angle: p.life * 5,
+                                        child: Container(
+                                            width: 8,
+                                            height: 8,
+                                            decoration: BoxDecoration(
+                                                color: p.color,
+                                                shape: BoxShape.rectangle)))
+                                    : Container(
+                                        width: 7,
+                                        height: 7,
+                                        decoration: BoxDecoration(
+                                            color: p.color,
+                                            shape: BoxShape.circle,
+                                            boxShadow: [
+                                              BoxShadow(
+                                                  color:
+                                                      p.color.withOpacity(0.6),
+                                                  blurRadius: 4)
+                                            ])),
+                              ),
+                            )),
+
+                        // Balloons
+                        ...tiles.map((tile) => Positioned(
+                            left: tile.x,
+                            top: tile.y,
+                            child: _buildBalloon(tile))),
+
+                        // Start / Game Over overlay
+                        if (!gameActive)
+                          Container(
+                            color: Colors.black54,
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.all(28),
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 32),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1A1A2E),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                        gameOver
+                                            ? 'Game Over! 💀'
+                                            : '${widget.topicEmoji} ${widget.topicName}',
+                                        style: const TextStyle(
+                                            fontSize: 26,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold)),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                        widget.mode == 'easy'
+                                            ? '🟢 Easy Mode'
+                                            : '🔴 Advanced Mode',
+                                        style: TextStyle(
+                                            fontSize: 14,
+                                            color: widget.themeColor)),
+                                    if (gameOver) ...[
+                                      const SizedBox(height: 12),
+                                      const Divider(color: Colors.white24),
+                                      _statRow(
+                                          '🏆 Score', '$score', Colors.amber),
+                                      _statRow(
+                                          '🎯 Accuracy',
+                                          '${_accuracy.toStringAsFixed(1)}%',
+                                          Colors.greenAccent),
+                                      _statRow('⚡ WPM', _wpm.toStringAsFixed(1),
+                                          Colors.cyanAccent),
+                                      const SizedBox(height: 8),
+                                    ],
+                                    const SizedBox(height: 16),
+                                    ElevatedButton(
+                                      onPressed:
+                                          _wordPool.isEmpty ? null : startGame,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: widget.themeColor,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 40, vertical: 14),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12)),
+                                      ),
+                                      child: Text(
+                                          gameOver
+                                              ? 'Play Again'
+                                              : 'Start Game',
+                                          style: const TextStyle(fontSize: 18)),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pushReplacement(
+                                              context,
+                                              MaterialPageRoute(
+                                                  builder: (_) =>
+                                                      const HomeScreen())),
+                                      child: const Text('🏠 Home',
+                                          style: TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 14)),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+
+                  // Input field
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                    child: TextField(
+                      controller: _controller,
+                      enabled: gameActive,
+                      autofocus: true,
+                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                      decoration: InputDecoration(
+                        hintText: 'Type here...',
+                        hintStyle: const TextStyle(color: Colors.white38),
+                        filled: true,
+                        fillColor: const Color(0xFF1A1A2E),
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide:
+                                const BorderSide(color: Colors.white24)),
+                        enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide:
+                                const BorderSide(color: Colors.white24)),
+                        focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: widget.themeColor)),
+                      ),
+                      onChanged: (_) => _checkWord(),
+                      onSubmitted: _onSubmitted,
+                    ),
+                  ),
+                ],
               ),
             ),
-          ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statRow(String label, String value, Color color) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 15)),
+          Text(value,
+              style: TextStyle(
+                  color: color, fontSize: 16, fontWeight: FontWeight.bold)),
         ],
       ),
     );
   }
+
+  Widget _dialogStatRow(String label, String value, Color color) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 13)),
+          Text(value,
+              style: TextStyle(
+                  color: color, fontSize: 14, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBalloon(WordTile tile) {
+    final typed = _controller.text.toLowerCase().trim();
+    if (tile.isPopping) {
+      return TweenAnimationBuilder<double>(
+        tween: Tween(begin: 1.0, end: 3.0),
+        duration: const Duration(milliseconds: 350),
+        builder: (context, scale, child) => Opacity(
+          opacity: (3.0 - scale) / 2.0,
+          child: Transform.scale(
+            scale: scale,
+            child: Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: tile.balloonColor.withOpacity(0.5),
+                boxShadow: [
+                  BoxShadow(
+                      color: tile.balloonColor, blurRadius: 20, spreadRadius: 5)
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    double w = tile.isPower ? 115.0 : 95.0;
+    double h = w * 1.3;
+
+    return SizedBox(
+      width: w,
+      child: CustomPaint(
+        size: Size(w, h),
+        painter: BalloonPainter(
+          color: tile.balloonColor,
+          isActive: tile.isActive,
+          isPower: tile.isPower,
+        ),
+        child: SizedBox(
+          width: w,
+          height: h,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(6, h * 0.15, 6, h * 0.28),
+            child: Center(
+              child: tile.isActive && typed.isNotEmpty
+                  ? RichText(
+                      textAlign: TextAlign.center,
+                      text: TextSpan(children: [
+                        TextSpan(
+                          text: tile.word.substring(0, typed.length),
+                          style: TextStyle(
+                            color: tile.isPower
+                                ? Colors.amber
+                                : Colors.greenAccent,
+                            fontSize: tile.isPower ? 17 : 15,
+                            fontWeight: FontWeight.bold,
+                            shadows: [
+                              Shadow(
+                                  blurRadius: 8,
+                                  color: tile.isPower
+                                      ? Colors.amber
+                                      : Colors.greenAccent),
+                              const Shadow(
+                                  blurRadius: 4, color: Colors.black87),
+                            ],
+                          ),
+                        ),
+                        TextSpan(
+                          text: tile.word.substring(typed.length),
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: tile.isPower ? 17 : 15,
+                            shadows: const [
+                              Shadow(blurRadius: 4, color: Colors.black87)
+                            ],
+                          ),
+                        ),
+                      ]),
+                    )
+                  : Text(tile.word,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: tile.isPower ? Colors.amber : Colors.white,
+                        fontSize: tile.isPower ? 17 : 15,
+                        fontWeight:
+                            tile.isPower ? FontWeight.bold : FontWeight.normal,
+                        shadows: const [
+                          Shadow(blurRadius: 4, color: Colors.black87)
+                        ],
+                      )),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Particle {
+  double x, y, vx, vy, life;
+  Color color;
+  bool isSpike;
+
+  _Particle({
+    required this.x,
+    required this.y,
+    required this.vx,
+    required this.vy,
+    required this.color,
+    required this.life,
+    this.isSpike = false,
+  });
 }
