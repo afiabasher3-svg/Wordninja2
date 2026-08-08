@@ -1,13 +1,43 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
 import '../models/word_tile.dart';
+import '../models/word_note.dart';
+import '../models/topic.dart';
 import '../painters/balloon_painter.dart';
 import '../services/supabase_service.dart';
+import '../painters/topic_background.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
+import 'result_screen.dart';
 
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+  final String mode;
+  final List<Topic> topics;
+
+  /// Part 9: when set, the game should be seeded from these words
+  /// instead of (or in addition to) the normal topic pool.
+  final List<WordNote>? reviewWords;
+
+  const GameScreen({
+    super.key,
+    required this.mode,
+    required this.topics,
+    this.reviewWords,
+  });
+
+  // Convenience accessors so the rest of the screen reads naturally when
+  // one or several topics are in play.
+  List<int> get topicIds => topics.map((t) => t.id).toList();
+  Color get themeColor => topics.first.themeColor;
+  Color get bgColor => topics.first.bgColor;
+  String get topicName => topics.map((t) => t.name).join(' + ');
+  String get topicEmoji => topics.map((t) => t.emoji).join(' ');
+
+  /// Primary topic id — used for session tracking / result screen when a
+  /// single representative topic id is needed (e.g. multi-topic sessions
+  /// are recorded under their first topic).
+  int get topicId => topics.first.id;
+
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
@@ -20,62 +50,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   int score = 0, lives = 3, level = 1;
   bool gameActive = false, gameOver = false;
   int _tickCount = 0, _spawnInterval = 160;
-  int _totalWords = 0, _correctWords = 0;
+  int _totalAttempts = 0, _correctWords = 0;
   DateTime? _gameStart;
   double _wpm = 0, _accuracy = 0;
+  bool _flashRed = false;
+  List<Map<String, dynamic>> _wordPool = [];
 
-  final List<Color> balloonColors = [
-    Colors.redAccent,
-    Colors.blueAccent,
-    Colors.greenAccent,
-    Colors.purpleAccent,
-    Colors.pinkAccent,
-    Colors.cyanAccent,
-    Colors.orangeAccent,
-  ];
-
-  final List<String> normalWords = [
-    "slice",
-    "ninja",
-    "blade",
-    "swift",
-    "sharp",
-    "speed",
-    "focus",
-    "words",
-    "grace",
-    "power",
-    "flash",
-    "quest",
-    "tiger",
-    "storm",
-    "brave",
-    "craft",
-    "agile",
-    "skill",
-    "laser",
-    "punch",
-    "flame",
-    "crest",
-    "glide",
-    "snipe",
-    "dodge",
-  ];
-
-  final List<String> powerWords = [
-    "keyboard",
-    "practice",
-    "velocity",
-    "accuracy",
-    "reaction",
-    "destroy",
-    "achieve",
-    "warrior",
-    "champion",
-    "precision",
-    "challenge",
-    "lightning",
-  ];
+  // --- Vocabulary Notebook session tracking (Part 3) ---
+  final List<WordNote> _sessionWords = [];
+  final Set<String> _sessionWordKeys = {}; // de-dup guard
+  final Stopwatch _sessionStopwatch = Stopwatch();
 
   late AnimationController _gameLoop;
 
@@ -86,9 +70,68 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(days: 1),
     )..addListener(_tick);
+    _loadWords();
+  }
+
+  Future<void> _loadWords() async {
+    final data = await SupabaseService.client
+        .from('words')
+        .select()
+        .inFilter('topic_id', widget.topicIds)
+        .eq('difficulty', widget.mode);
+    setState(() {
+      _wordPool = List<Map<String, dynamic>>.from(data);
+    });
+  }
+
+  /// Looks up a word's own topic so multi-topic games can color/tag each
+  /// balloon by the topic it actually belongs to.
+  Topic _topicForWord(Map<String, dynamic> wordData) {
+    final id = wordData['topic_id'];
+    return widget.topics
+        .firstWhere((t) => t.id == id, orElse: () => widget.topics.first);
+  }
+
+  // Synonym balloons unlock once the player has leveled up a bit, on top of
+  // the existing advanced-mode behavior.
+  static const int _synonymUnlockLevel = 3;
+  bool get _synonymsActive => widget.mode == 'advanced';
+
+  /// status must be one of: 'popped' | 'missed' | 'synonym'
+  void _trackSessionWord({
+    required String word,
+    String? meaning,
+    String? pronunciation,
+    int? topicId,
+    required String status,
+  }) {
+    final note = WordNote(
+      word: word,
+      meaning: meaning ?? '',
+      pronunciation: pronunciation ?? '',
+      topicId: topicId ?? widget.topicId,
+      mode: widget.mode,
+      status: status,
+    );
+
+    // Avoid duplicate entries for the same word+topic+mode within one session.
+    if (_sessionWordKeys.add(note.sessionKey)) {
+      _sessionWords.add(note);
+    } else {
+      // Word already tracked this session — upgrade its status if the
+      // new interaction is "better" (popped/synonym should win over missed).
+      final idx =
+          _sessionWords.indexWhere((w) => w.sessionKey == note.sessionKey);
+      if (idx != -1 &&
+          _sessionWords[idx].status == 'missed' &&
+          status != 'missed') {
+        _sessionWords[idx] = _sessionWords[idx].copyWith(status: status);
+      }
+    }
   }
 
   void startGame() {
+    if (_wordPool.isEmpty) return;
     setState(() {
       tiles.clear();
       particles.clear();
@@ -98,11 +141,17 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       gameActive = true;
       gameOver = false;
       _tickCount = 0;
-      _totalWords = 0;
+      _totalAttempts = 0;
       _correctWords = 0;
+      _sessionWords.clear();
+      _sessionWordKeys.clear();
       _gameStart = DateTime.now();
       _controller.clear();
+      _flashRed = false;
     });
+    _sessionStopwatch
+      ..reset()
+      ..start();
     _gameLoop.forward(from: 0);
     _spawnWord();
   }
@@ -131,9 +180,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (!gameActive) return;
     _tickCount++;
     setState(() {
-      double speed = 0.4 + (level * 0.06);
+      // Speed climbs faster with each level so higher levels feel
+      // noticeably more intense, not just marginally quicker.
+      double speed = 0.7 + (level * 0.10) + (level * level * 0.005);
       for (var t in tiles) {
-        if (!t.isPopping) t.y -= t.isPower ? speed * 0.7 : speed;
+        if (!t.isPopping) t.y -= t.isPower ? speed * 0.85 : speed;
       }
 
       for (var p in particles) {
@@ -147,9 +198,20 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       tiles.removeWhere((t) {
         if (t.isPopping) return false;
         if (t.y < 55) {
-          _totalWords++;
           lives--;
           _spawnParticles(t.x + 45, 60, t.balloonColor, isSpike: true);
+
+          // session words এ missed হিসেবে যোগ করো
+          final wordData = _wordPool.firstWhere((w) => w['word'] == t.word,
+              orElse: () => {});
+          _trackSessionWord(
+            word: t.word,
+            meaning: wordData['meaning'] as String?,
+            pronunciation: wordData['pronunciation'] as String?,
+            topicId: wordData['topic_id'] as int?,
+            status: 'missed',
+          );
+
           if (lives <= 0) _endGame();
           return true;
         }
@@ -163,11 +225,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
       if (_tickCount % _spawnInterval == 0) {
         _spawnWord();
-        if (_tickCount % (_spawnInterval * 5) == 0) _spawnPowerWord();
       }
-      if (_tickCount % 500 == 0 && level < 10) {
+      if (_tickCount % 500 == 0 && level < 15) {
         level++;
-        _spawnInterval = max(100, 160 - level * 8);
+        _spawnInterval = max(70, 160 - level * 8);
       }
     });
   }
@@ -175,64 +236,161 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   void _spawnWord() {
     if (!gameActive) return;
     if (tiles.length >= 4) return;
-    final word = normalWords[_random.nextInt(normalWords.length)];
+    if (_wordPool.isEmpty) return;
+
+    final wordData = _wordPool[_random.nextInt(_wordPool.length)];
+    final word = wordData['word'] as String;
+
+    // একই word দুইবার না আসে
+    if (tiles.any((t) => t.word == word)) return;
+
     final x = 20 + _random.nextDouble() * (_screenWidth - 140);
-    final color = balloonColors[_random.nextInt(balloonColors.length)];
+    final topic = _topicForWord(wordData);
+
     setState(() => tiles.add(WordTile(
           word: word,
           x: x,
           y: _screenHeight - 150,
-          balloonColor: color,
+          balloonColor: topic.themeColor,
+          isPower: false,
         )));
   }
 
-  void _spawnPowerWord() {
-    if (!gameActive) return;
-    if (tiles.length >= 4) return;
-    final word = powerWords[_random.nextInt(powerWords.length)];
-    final x = 20 + _random.nextDouble() * (_screenWidth - 180);
-    setState(() => tiles.add(WordTile(
-          word: word,
-          x: x,
-          y: _screenHeight - 150,
-          isPower: true,
-          balloonColor: Colors.amber,
-        )));
+  void _spawnSynonymBalloon(String synonym) {
+    if (!mounted) return;
+    final x = 20 + _random.nextDouble() * (_screenWidth - 140);
+    setState(() {
+      tiles.add(WordTile(
+        word: synonym,
+        x: x,
+        y: _screenHeight - 150,
+        balloonColor: Colors.amber,
+        isPower: true,
+      ));
+    });
   }
 
   void _checkWord() {
     final typed = _controller.text.toLowerCase().trim();
+    if (typed.isEmpty) return;
+
     final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
+
     if (match.isNotEmpty) {
       final tile = match.first;
       _spawnParticles(tile.x + 45, tile.y + 50, tile.balloonColor);
+
+      // session words এ track করো (pool এ থাকুক বা না থাকুক — synonym balloon
+      // এর word pool এ নাও থাকতে পারে, সেক্ষেত্রে meaning/pronunciation ফাঁকা যাবে)
+      final wordData =
+          _wordPool.firstWhere((w) => w['word'] == tile.word, orElse: () => {});
+      _trackSessionWord(
+        word: tile.word,
+        meaning: wordData['meaning'] as String?,
+        pronunciation: wordData['pronunciation'] as String?,
+        topicId: wordData['topic_id'] as int?,
+        status: tile.isPower ? 'synonym' : 'popped',
+      );
+
       setState(() {
         tile.isPopping = true;
         score += tile.isPower ? typed.length * level * 3 : typed.length * level;
-        _totalWords++;
         _correctWords++;
         _controller.clear();
       });
+
+      // Synonym balloon spawns once unlocked (advanced mode, or any mode
+      // after leveling up)
+      if (_synonymsActive && !tile.isPower) {
+        final original = _wordPool.firstWhere((w) => w['word'] == tile.word,
+            orElse: () => {});
+        if (original.isNotEmpty) {
+          final synonyms = List<String>.from(original['synonyms'] ?? []);
+          if (synonyms.isNotEmpty) {
+            final synonym = synonyms[_random.nextInt(synonyms.length)];
+            Future.delayed(const Duration(milliseconds: 500), () {
+              _spawnSynonymBalloon(synonym);
+            });
+          }
+        }
+      }
+
       Future.delayed(const Duration(milliseconds: 400),
           () => setState(() => tiles.remove(tile)));
+    }
+  }
+
+  void _onSubmitted(String value) {
+    final typed = value.toLowerCase().trim();
+    if (typed.isEmpty) return;
+
+    final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
+
+    if (match.isEmpty) {
+      // ভুল word — red flash + clear
+      _totalAttempts++;
+      setState(() => _flashRed = true);
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted) setState(() => _flashRed = false);
+      });
+      _controller.clear();
     }
   }
 
   void _calculateStats() {
     final elapsed = DateTime.now().difference(_gameStart!).inSeconds;
     _wpm = elapsed > 0 ? (_correctWords / elapsed * 60) : 0;
-    _accuracy = _totalWords > 0 ? (_correctWords / _totalWords * 100) : 0;
+    _accuracy = (_totalAttempts + _correctWords) > 0
+        ? (_correctWords / (_totalAttempts + _correctWords) * 100)
+        : 0;
   }
 
-  void _endGame() async {
+  Future<void> _endGame() async {
     _calculateStats();
     setState(() {
       gameActive = false;
       gameOver = true;
     });
     _gameLoop.stop();
+    _sessionStopwatch.stop();
+
     await SupabaseService.saveScore(
         score: score, accuracy: _accuracy, wpm: _wpm);
+
+    // Part 8: save the session's words to Supabase before navigating.
+    // Non-fatal if this fails — don't block the player from seeing
+    // their results just because the notebook sync failed.
+    try {
+      if (_sessionWords.isNotEmpty) {
+        await SupabaseService.saveSessionWords(_sessionWords);
+      }
+    } catch (_) {
+      // TODO: hook into your existing ErrorHelper if you want visibility.
+    }
+
+    if (!mounted) return;
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ResultScreen(
+          topicEmoji: widget.topicEmoji,
+          topicName: widget.topicName,
+          topicId: widget.topicId,
+          mode: widget.mode,
+          finalScore: score,
+          accuracy: _accuracy,
+          wpm: _wpm,
+          levelReached: level,
+          wordsPopped: _sessionWords.where((w) => w.status == 'popped').length,
+          wordsMissed: _sessionWords.where((w) => w.status == 'missed').length,
+          synonymsCompleted:
+              _sessionWords.where((w) => w.status == 'synonym').length,
+          timePlayed: _sessionStopwatch.elapsed,
+          sessionWords: _sessionWords,
+        ),
+      ),
+    );
   }
 
   @override
@@ -242,329 +400,303 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  Future<bool> _onWillPop() async {
+    if (gameActive) {
+      _calculateStats();
+      final quit = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A2E),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Quit Game?',
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Are you sure you want to quit?',
+                  style: TextStyle(color: Color(0xFF8B8BAD))),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A0A14),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(children: [
+                  _dialogStatRow('🏆 Score', '$score', Colors.amber),
+                  _dialogStatRow('🎯 Accuracy',
+                      '${_accuracy.toStringAsFixed(1)}%', Colors.greenAccent),
+                  _dialogStatRow(
+                      '⚡ WPM', _wpm.toStringAsFixed(1), Colors.cyanAccent),
+                ]),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep Playing',
+                  style: TextStyle(
+                      color: Color(0xFFC084FC), fontWeight: FontWeight.bold)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Quit',
+                  style: TextStyle(
+                      color: Colors.redAccent, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      );
+      if (quit == true) {
+        _gameLoop.stop();
+        if (mounted) {
+          Navigator.pushReplacement(
+              context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+        }
+      }
+      return false;
+    }
+    Navigator.pushReplacement(
+        context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
-      onWillPop: () async {
-        if (gameActive) {
-          _calculateStats();
-          final quit = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              backgroundColor: const Color(0xFF1A1A2E),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
-              title: const Text('Quit Game?',
-                  style: TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Are you sure you want to quit?',
-                      style: TextStyle(color: Color(0xFF8B8BAD))),
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF0A0A14),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Column(children: [
-                      _dialogStatRow('🏆 Score', '$score', Colors.amber),
-                      _dialogStatRow(
-                          '🎯 Accuracy',
-                          '${_accuracy.toStringAsFixed(1)}%',
-                          Colors.greenAccent),
-                      _dialogStatRow(
-                          '⚡ WPM', _wpm.toStringAsFixed(1), Colors.cyanAccent),
-                    ]),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('Keep Playing',
-                      style: TextStyle(
-                          color: Color(0xFFC084FC),
-                          fontWeight: FontWeight.bold)),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('Quit',
-                      style: TextStyle(
-                          color: Colors.redAccent,
-                          fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
-          );
-          if (quit == true) {
-            _gameLoop.stop();
-            if (mounted) {
-              Navigator.pushReplacement(context,
-                  MaterialPageRoute(builder: (_) => const HomeScreen()));
-            }
-          }
-          return false;
-        }
-        Navigator.pushReplacement(
-            context, MaterialPageRoute(builder: (_) => const HomeScreen()));
-        return false;
-      },
+      onWillPop: _onWillPop,
       child: Scaffold(
         resizeToAvoidBottomInset: false,
-        body: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text('Score: $score',
-                        style:
-                            const TextStyle(fontSize: 18, color: Colors.white)),
-                    Text('Level: $level',
-                        style:
-                            const TextStyle(fontSize: 18, color: Colors.amber)),
-                    Row(children: [
-                      Text('❤️' * lives + '🖤' * (3 - lives),
-                          style: const TextStyle(fontSize: 18)),
-                      const SizedBox(width: 4),
-                      IconButton(
-                        icon: const Icon(Icons.home_rounded,
-                            color: Colors.white38, size: 20),
-                        onPressed: () => Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => const HomeScreen())),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.home_rounded,
-                            color: Colors.white38, size: 20),
-                        onPressed: () async {
-                          if (gameActive) {
-                            _calculateStats();
-                            final quit = await showDialog<bool>(
-                              context: context,
-                              builder: (_) => AlertDialog(
-                                backgroundColor: const Color(0xFF1A1A2E),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16)),
-                                title: const Text('Quit Game?',
-                                    style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold)),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text('Are you sure you want to quit?',
-                                        style: TextStyle(
-                                            color: Color(0xFF8B8BAD))),
-                                    const SizedBox(height: 12),
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF0A0A14),
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Column(children: [
-                                        _dialogStatRow(
-                                            '🏆 Score', '$score', Colors.amber),
-                                        _dialogStatRow(
-                                            '🎯 Accuracy',
-                                            '${_accuracy.toStringAsFixed(1)}%',
-                                            Colors.greenAccent),
-                                        _dialogStatRow(
-                                            '⚡ WPM',
-                                            _wpm.toStringAsFixed(1),
-                                            Colors.cyanAccent),
-                                      ]),
-                                    ),
-                                  ],
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(context, false),
-                                    child: const Text('Keep Playing',
-                                        style: TextStyle(
-                                            color: Color(0xFFC084FC),
-                                            fontWeight: FontWeight.bold)),
-                                  ),
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(context, true),
-                                    child: const Text('Quit',
-                                        style: TextStyle(
-                                            color: Colors.redAccent,
-                                            fontWeight: FontWeight.bold)),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (quit == true) {
-                              _gameLoop.stop();
+        body: Stack(
+          children: [
+            TopicBackground(topics: widget.topics),
+            if (_flashRed) Container(color: Colors.red.withOpacity(0.15)),
+            SafeArea(
+              child: Column(
+                children: [
+                  // Top bar
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Score: $score',
+                            style: const TextStyle(
+                                fontSize: 16, color: Colors.white)),
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: Text(
+                              '${widget.topicEmoji} ${widget.topicName}',
+                              style: TextStyle(
+                                  fontSize: 13, color: widget.themeColor),
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ),
+                        Row(children: [
+                          Text('❤️' * lives + '🖤' * (3 - lives),
+                              style: const TextStyle(fontSize: 16)),
+                          const SizedBox(width: 4),
+                          IconButton(
+                            icon: const Icon(Icons.home_rounded,
+                                color: Colors.white38, size: 20),
+                            onPressed: () async => await _onWillPop(),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.logout,
+                                color: Colors.white38, size: 20),
+                            onPressed: () async {
+                              await SupabaseService.signOut();
                               if (mounted) {
                                 Navigator.pushReplacement(
                                     context,
                                     MaterialPageRoute(
-                                        builder: (_) => const HomeScreen()));
+                                        builder: (_) => const LoginScreen()));
                               }
-                            }
-                          } else {
-                            Navigator.pushReplacement(
-                                context,
-                                MaterialPageRoute(
-                                    builder: (_) => const HomeScreen()));
-                          }
-                        },
-                      ),
-                    ]),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: Stack(
-                  children: [
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: CustomPaint(
-                        size: Size(_screenWidth, 50),
-                        painter: SpikesPainter(),
-                      ),
-                    ),
-                    ...particles.map((p) => Positioned(
-                          left: p.x,
-                          top: p.y,
-                          child: Opacity(
-                            opacity: p.life.clamp(0.0, 1.0),
-                            child: p.isSpike
-                                ? Transform.rotate(
-                                    angle: p.life * 5,
-                                    child: Container(
-                                        width: 8,
-                                        height: 8,
-                                        decoration: BoxDecoration(
-                                            color: p.color,
-                                            shape: BoxShape.rectangle)))
-                                : Container(
-                                    width: 7,
-                                    height: 7,
-                                    decoration: BoxDecoration(
-                                        color: p.color,
-                                        shape: BoxShape.circle,
-                                        boxShadow: [
-                                          BoxShadow(
-                                              color: p.color.withOpacity(0.6),
-                                              blurRadius: 4)
-                                        ])),
+                            },
                           ),
-                        )),
-                    ...tiles.map((tile) => Positioned(
-                        left: tile.x, top: tile.y, child: _buildBalloon(tile))),
-                    if (!gameActive)
-                      Container(
-                        color: Colors.black54,
-                        child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.all(28),
-                            margin: const EdgeInsets.symmetric(horizontal: 32),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1A1A2E),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: Colors.white24),
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                    gameOver
-                                        ? 'Game Over! 💀'
-                                        : 'Word Ninja 🎯',
-                                    style: const TextStyle(
-                                        fontSize: 28,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 10),
-                                if (gameOver) ...[
-                                  const Divider(color: Colors.white24),
-                                  const SizedBox(height: 8),
-                                  _statRow('🏆 Score', '$score', Colors.amber),
-                                  _statRow(
-                                      '🎯 Accuracy',
-                                      '${_accuracy.toStringAsFixed(1)}%',
-                                      Colors.greenAccent),
-                                  _statRow('⚡ WPM', _wpm.toStringAsFixed(1),
-                                      Colors.cyanAccent),
-                                  const SizedBox(height: 8),
-                                ],
-                                const SizedBox(height: 16),
-                                ElevatedButton(
-                                  onPressed: startGame,
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.deepPurple,
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 40, vertical: 14),
-                                    shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(12)),
-                                  ),
-                                  child: Text(
-                                      gameOver ? 'Play Again' : 'Start Game',
-                                      style: const TextStyle(fontSize: 18)),
-                                ),
-                                const SizedBox(height: 8),
-                                TextButton(
-                                  onPressed: () => Navigator.pushReplacement(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => const HomeScreen())),
-                                  child: const Text('🏠 Home',
-                                      style: TextStyle(
-                                          color: Colors.white54, fontSize: 14)),
-                                ),
-                              ],
-                            ),
+                        ]),
+                      ],
+                    ),
+                  ),
+
+                  // Game area
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        // Spikes
+                        Positioned(
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          child: CustomPaint(
+                            size: Size(_screenWidth, 50),
+                            painter: SpikesPainter(),
                           ),
                         ),
-                      ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: TextField(
-                  controller: _controller,
-                  enabled: gameActive,
-                  autofocus: true,
-                  style: const TextStyle(color: Colors.white, fontSize: 18),
-                  decoration: InputDecoration(
-                    hintText: 'Type here...',
-                    hintStyle: const TextStyle(color: Colors.white38),
-                    filled: true,
-                    fillColor: const Color(0xFF1A1A2E),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Colors.white24)),
-                    enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Colors.white24)),
-                    focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Colors.deepPurple)),
+
+                        // Particles
+                        ...particles.map((p) => Positioned(
+                              left: p.x,
+                              top: p.y,
+                              child: Opacity(
+                                opacity: p.life.clamp(0.0, 1.0),
+                                child: p.isSpike
+                                    ? Transform.rotate(
+                                        angle: p.life * 5,
+                                        child: Container(
+                                            width: 8,
+                                            height: 8,
+                                            decoration: BoxDecoration(
+                                                color: p.color,
+                                                shape: BoxShape.rectangle)))
+                                    : Container(
+                                        width: 7,
+                                        height: 7,
+                                        decoration: BoxDecoration(
+                                            color: p.color,
+                                            shape: BoxShape.circle,
+                                            boxShadow: [
+                                              BoxShadow(
+                                                  color:
+                                                      p.color.withOpacity(0.6),
+                                                  blurRadius: 4)
+                                            ])),
+                              ),
+                            )),
+
+                        // Balloons
+                        ...tiles.map((tile) => Positioned(
+                            left: tile.x,
+                            top: tile.y,
+                            child: _buildBalloon(tile))),
+
+                        // Start / Game Over overlay
+                        if (!gameActive)
+                          Container(
+                            color: Colors.black54,
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.all(28),
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 32),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1A1A2E),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                        gameOver
+                                            ? 'Game Over! 💀'
+                                            : '${widget.topicEmoji} ${widget.topicName}',
+                                        style: const TextStyle(
+                                            fontSize: 26,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold)),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                        widget.mode == 'easy'
+                                            ? '🟢 Easy Mode'
+                                            : '🔴 Advanced Mode',
+                                        style: TextStyle(
+                                            fontSize: 14,
+                                            color: widget.themeColor)),
+                                    if (gameOver) ...[
+                                      const SizedBox(height: 12),
+                                      const Divider(color: Colors.white24),
+                                      _statRow(
+                                          '🏆 Score', '$score', Colors.amber),
+                                      _statRow(
+                                          '🎯 Accuracy',
+                                          '${_accuracy.toStringAsFixed(1)}%',
+                                          Colors.greenAccent),
+                                      _statRow('⚡ WPM', _wpm.toStringAsFixed(1),
+                                          Colors.cyanAccent),
+                                      const SizedBox(height: 8),
+                                    ],
+                                    const SizedBox(height: 16),
+                                    ElevatedButton(
+                                      onPressed:
+                                          _wordPool.isEmpty ? null : startGame,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: widget.themeColor,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 40, vertical: 14),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12)),
+                                      ),
+                                      child: Text(
+                                          gameOver
+                                              ? 'Play Again'
+                                              : 'Start Game',
+                                          style: const TextStyle(fontSize: 18)),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pushReplacement(
+                                              context,
+                                              MaterialPageRoute(
+                                                  builder: (_) =>
+                                                      const HomeScreen())),
+                                      child: const Text('🏠 Home',
+                                          style: TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 14)),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                  onChanged: (_) => _checkWord(),
-                ),
+
+                  // Input field
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                    child: TextField(
+                      controller: _controller,
+                      enabled: gameActive,
+                      autofocus: true,
+                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                      decoration: InputDecoration(
+                        hintText: 'Type here...',
+                        hintStyle: const TextStyle(color: Colors.white38),
+                        filled: true,
+                        fillColor: const Color(0xFF1A1A2E),
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide:
+                                const BorderSide(color: Colors.white24)),
+                        enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide:
+                                const BorderSide(color: Colors.white24)),
+                        focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: widget.themeColor)),
+                      ),
+                      onChanged: (_) => _checkWord(),
+                      onSubmitted: _onSubmitted,
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
