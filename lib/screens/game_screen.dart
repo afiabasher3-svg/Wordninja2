@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'dart:async';
 import 'dart:math';
 import '../models/word_tile.dart';
 import '../models/word_note.dart';
@@ -14,28 +16,26 @@ class GameScreen extends StatefulWidget {
   final String mode;
   final List<Topic> topics;
 
-  /// Part 9: when set, the game should be seeded from these words
-  /// instead of (or in addition to) the normal topic pool.
+  final String gameType;
   final List<WordNote>? reviewWords;
 
   const GameScreen({
     super.key,
     required this.mode,
     required this.topics,
+    this.gameType = 'survival',
     this.reviewWords,
   });
 
-  // Convenience accessors so the rest of the screen reads naturally when
-  // one or several topics are in play.
   List<int> get topicIds => topics.map((t) => t.id).toList();
   Color get themeColor => topics.first.themeColor;
   Color get bgColor => topics.first.bgColor;
   String get topicName => topics.map((t) => t.name).join(' + ');
   String get topicEmoji => topics.map((t) => t.emoji).join(' ');
 
-  /// Primary topic id — used for session tracking / result screen when a
-  /// single representative topic id is needed (e.g. multi-topic sessions
-  /// are recorded under their first topic).
+  bool get isTimeAttack => gameType == 'time_attack';
+  bool get isZen => gameType == 'zen';
+  bool get usesLives => gameType == 'survival';
   int get topicId => topics.first.id;
 
   @override
@@ -56,10 +56,20 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   bool _flashRed = false;
   List<Map<String, dynamic>> _wordPool = [];
 
-  // --- Vocabulary Notebook session tracking (Part 3) ---
   final List<WordNote> _sessionWords = [];
-  final Set<String> _sessionWordKeys = {}; // de-dup guard
+  final Set<String> _sessionWordKeys = {};
   final Stopwatch _sessionStopwatch = Stopwatch();
+
+  static const int _timeAttackSeconds = 60;
+  int _secondsLeft = _timeAttackSeconds;
+  Timer? _countdownTimer;
+
+  // --- Golden Balloon Rain (level-up celebration) ---
+  late AnimationController _rainController;
+  late AnimationController _levelTextController;
+  List<_RainBalloon> _rainBalloons = [];
+  bool _rainActive = false;
+  int _lastCelebLevel = 0;
 
   late AnimationController _gameLoop;
 
@@ -70,6 +80,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(days: 1),
     )..addListener(_tick);
+
+    _rainController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          setState(() => _rainActive = false);
+        }
+      });
+
+    // "LEVEL UP" টেক্সটের জন্য আলাদা controller — bounce in করবে
+    _levelTextController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+
     _loadWords();
   }
 
@@ -84,20 +110,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     });
   }
 
-  /// Looks up a word's own topic so multi-topic games can color/tag each
-  /// balloon by the topic it actually belongs to.
   Topic _topicForWord(Map<String, dynamic> wordData) {
     final id = wordData['topic_id'];
     return widget.topics
         .firstWhere((t) => t.id == id, orElse: () => widget.topics.first);
   }
 
-  // Synonym balloons unlock once the player has leveled up a bit, on top of
-  // the existing advanced-mode behavior.
-  static const int _synonymUnlockLevel = 3;
   bool get _synonymsActive => widget.mode == 'advanced';
 
-  /// status must be one of: 'popped' | 'missed' | 'synonym'
   void _trackSessionWord({
     required String word,
     String? meaning,
@@ -114,12 +134,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       status: status,
     );
 
-    // Avoid duplicate entries for the same word+topic+mode within one session.
     if (_sessionWordKeys.add(note.sessionKey)) {
       _sessionWords.add(note);
     } else {
-      // Word already tracked this session — upgrade its status if the
-      // new interaction is "better" (popped/synonym should win over missed).
       final idx =
           _sessionWords.indexWhere((w) => w.sessionKey == note.sessionKey);
       if (idx != -1 &&
@@ -148,12 +165,35 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _gameStart = DateTime.now();
       _controller.clear();
       _flashRed = false;
+      _secondsLeft = _timeAttackSeconds;
+      _spawnInterval = 160;
+      _rainActive = false;
+      _rainBalloons = [];
+      _lastCelebLevel = 0;
     });
     _sessionStopwatch
       ..reset()
       ..start();
+    _countdownTimer?.cancel();
+    if (widget.isTimeAttack) {
+      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!gameActive) {
+          t.cancel();
+          return;
+        }
+        setState(() => _secondsLeft--);
+        if (_secondsLeft <= 0) {
+          t.cancel();
+          _endGame();
+        }
+      });
+    }
     _gameLoop.forward(from: 0);
-    _spawnWord();
+    setState(() {
+      for (int i = 0; i < 3; i++) {
+        _doSpawnWord();
+      }
+    });
   }
 
   double get _screenHeight => MediaQuery.of(context).size.height;
@@ -180,11 +220,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (!gameActive) return;
     _tickCount++;
     setState(() {
-      // Speed climbs faster with each level so higher levels feel
-      // noticeably more intense, not just marginally quicker.
-      double speed = 0.7 + (level * 0.10) + (level * level * 0.005);
+      double speed = 0.4 + (level * 0.045) + (level * level * 0.0015);
+      final midpoint = _screenHeight / 2;
+      const bottomHalfBoost = 2.4;
       for (var t in tiles) {
-        if (!t.isPopping) t.y -= t.isPower ? speed * 0.85 : speed;
+        if (t.isPopping) continue;
+        final base = t.isPower ? speed * 0.85 : speed;
+        final effective = t.y > midpoint ? base * bottomHalfBoost : base;
+        t.y -= effective;
       }
 
       for (var p in particles) {
@@ -195,13 +238,15 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
       particles.removeWhere((p) => p.life <= 0);
 
+      int missedCount = 0;
       tiles.removeWhere((t) {
         if (t.isPopping) return false;
         if (t.y < 55) {
-          lives--;
+          missedCount++;
+          if (widget.usesLives) lives--;
+          HapticFeedback.heavyImpact();
           _spawnParticles(t.x + 45, 60, t.balloonColor, isSpike: true);
 
-          // session words এ missed হিসেবে যোগ করো
           final wordData = _wordPool.firstWhere((w) => w['word'] == t.word,
               orElse: () => {});
           _trackSessionWord(
@@ -212,7 +257,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             status: 'missed',
           );
 
-          if (lives <= 0) _endGame();
+          if (widget.usesLives && lives <= 0) _endGame();
           return true;
         }
         return false;
@@ -223,37 +268,76 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         t.isActive = typed.isNotEmpty && t.word.startsWith(typed);
       }
 
-      if (_tickCount % _spawnInterval == 0) {
-        _spawnWord();
+      for (int i = 0; i < missedCount; i++) {
+        _doSpawnWord();
       }
-      if (_tickCount % 500 == 0 && level < 15) {
-        level++;
-        _spawnInterval = max(70, 160 - level * 8);
+
+      if (_tickCount % _spawnInterval == 0) {
+        _doSpawnWord();
       }
     });
   }
 
-  void _spawnWord() {
+  static const int _wordsPerLevel = 8;
+
+  void _maybeLevelUp() {
+    final newLevel = 1 + (_correctWords ~/ _wordsPerLevel);
+    if (newLevel > level && newLevel <= 15) {
+      level = newLevel;
+      _spawnInterval = max(70, 160 - level * 8);
+      if (level > _lastCelebLevel) {
+        _lastCelebLevel = level;
+        _triggerGoldenRain();
+      }
+    }
+  }
+
+  void _triggerGoldenRain() {
+    final w = _screenWidth;
+    // ১২টা বেলুন — কম কিন্তু বড়, আরো visually striking
+    _rainBalloons = List.generate(12, (i) {
+      // স্ক্রিন সমানভাবে ভাগ করে spread করো, তারপর random offset দাও
+      final sectionWidth = w / 12;
+      return _RainBalloon(
+        x: sectionWidth * i + _random.nextDouble() * sectionWidth * 0.8,
+        size: 52 + _random.nextDouble() * 36, // 52–88px (আগে ছিল 36–64)
+        delay: i * 0.028 + _random.nextDouble() * 0.06, // staggered entry
+        wobble: 18 + _random.nextDouble() * 28,
+        // প্রতিটা বেলুনের নিজস্ব wobble phase যাতে sync না লাগে
+        wobblePhase: _random.nextDouble() * 2 * pi,
+      );
+    });
+    setState(() => _rainActive = true);
+    HapticFeedback.mediumImpact();
+    _rainController.forward(from: 0);
+    _levelTextController.forward(from: 0);
+  }
+
+  void _doSpawnWord() {
     if (!gameActive) return;
-    if (tiles.length >= 4) return;
+    final activeCount = tiles.where((t) => !t.isPopping).length;
+    if (activeCount >= 3) return;
     if (_wordPool.isEmpty) return;
 
     final wordData = _wordPool[_random.nextInt(_wordPool.length)];
     final word = wordData['word'] as String;
 
-    // একই word দুইবার না আসে
-    if (tiles.any((t) => t.word == word)) return;
+    if (tiles.any((t) => t.word == word && !t.isPopping)) return;
 
     final x = 20 + _random.nextDouble() * (_screenWidth - 140);
     final topic = _topicForWord(wordData);
 
-    setState(() => tiles.add(WordTile(
-          word: word,
-          x: x,
-          y: _screenHeight - 150,
-          balloonColor: topic.themeColor,
-          isPower: false,
-        )));
+    tiles.add(WordTile(
+      word: word,
+      x: x,
+      y: _screenHeight - 150,
+      balloonColor: topic.themeColor,
+      isPower: false,
+    ));
+  }
+
+  void _spawnWord() {
+    setState(_doSpawnWord);
   }
 
   void _spawnSynonymBalloon(String synonym) {
@@ -279,9 +363,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (match.isNotEmpty) {
       final tile = match.first;
       _spawnParticles(tile.x + 45, tile.y + 50, tile.balloonColor);
+      HapticFeedback.mediumImpact();
+      SystemSound.play(SystemSoundType.click);
 
-      // session words এ track করো (pool এ থাকুক বা না থাকুক — synonym balloon
-      // এর word pool এ নাও থাকতে পারে, সেক্ষেত্রে meaning/pronunciation ফাঁকা যাবে)
       final wordData =
           _wordPool.firstWhere((w) => w['word'] == tile.word, orElse: () => {});
       _trackSessionWord(
@@ -296,11 +380,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         tile.isPopping = true;
         score += tile.isPower ? typed.length * level * 3 : typed.length * level;
         _correctWords++;
+        _maybeLevelUp();
         _controller.clear();
+        _doSpawnWord();
       });
 
-      // Synonym balloon spawns once unlocked (advanced mode, or any mode
-      // after leveling up)
       if (_synonymsActive && !tile.isPower) {
         final original = _wordPool.firstWhere((w) => w['word'] == tile.word,
             orElse: () => {});
@@ -327,8 +411,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
 
     if (match.isEmpty) {
-      // ভুল word — red flash + clear
       _totalAttempts++;
+      HapticFeedback.lightImpact();
       setState(() => _flashRed = true);
       Future.delayed(const Duration(milliseconds: 400), () {
         if (mounted) setState(() => _flashRed = false);
@@ -353,20 +437,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     });
     _gameLoop.stop();
     _sessionStopwatch.stop();
+    _countdownTimer?.cancel();
 
     await SupabaseService.saveScore(
         score: score, accuracy: _accuracy, wpm: _wpm);
 
-    // Part 8: save the session's words to Supabase before navigating.
-    // Non-fatal if this fails — don't block the player from seeing
-    // their results just because the notebook sync failed.
     try {
       if (_sessionWords.isNotEmpty) {
         await SupabaseService.saveSessionWords(_sessionWords);
       }
-    } catch (_) {
-      // TODO: hook into your existing ErrorHelper if you want visibility.
-    }
+    } catch (_) {}
 
     if (!mounted) return;
 
@@ -396,7 +476,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     _gameLoop.dispose();
+    _rainController.dispose();
+    _levelTextController.dispose();
     _controller.dispose();
+    _countdownTimer?.cancel();
     super.dispose();
   }
 
@@ -453,6 +536,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       );
       if (quit == true) {
         _gameLoop.stop();
+        _countdownTimer?.cancel();
         if (mounted) {
           Navigator.pushReplacement(
               context, MaterialPageRoute(builder: (_) => const HomeScreen()));
@@ -485,9 +569,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('Score: $score',
+                        Text('Score: $score   •   Lv $level',
                             style: const TextStyle(
-                                fontSize: 16, color: Colors.white)),
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600)),
                         Flexible(
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -501,8 +587,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           ),
                         ),
                         Row(children: [
-                          Text('❤️' * lives + '🖤' * (3 - lives),
-                              style: const TextStyle(fontSize: 16)),
+                          if (widget.usesLives)
+                            Text('❤️' * lives + '🖤' * (3 - lives),
+                                style: const TextStyle(fontSize: 16))
+                          else if (widget.isTimeAttack)
+                            Text('⏱️ ${_secondsLeft}s',
+                                style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: _secondsLeft <= 10
+                                        ? Colors.redAccent
+                                        : Colors.white))
+                          else
+                            const Text('🧘 Zen',
+                                style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white70)),
                           const SizedBox(width: 4),
                           IconButton(
                             icon: const Icon(Icons.home_rounded,
@@ -531,7 +632,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                   Expanded(
                     child: Stack(
                       children: [
-                        // Spikes
                         Positioned(
                           top: 0,
                           left: 0,
@@ -542,7 +642,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           ),
                         ),
 
-                        // Particles
                         ...particles.map((p) => Positioned(
                               left: p.x,
                               top: p.y,
@@ -572,13 +671,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                               ),
                             )),
 
-                        // Balloons
                         ...tiles.map((tile) => Positioned(
                             left: tile.x,
                             top: tile.y,
                             child: _buildBalloon(tile))),
 
-                        // Start / Game Over overlay
                         if (!gameActive)
                           Container(
                             color: Colors.black54,
@@ -606,8 +703,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                     const SizedBox(height: 6),
                                     Text(
                                         widget.mode == 'easy'
-                                            ? '🟢 Easy Mode'
-                                            : '🔴 Advanced Mode',
+                                            ? '🟢 Word Pop'
+                                            : '🔴 Synonym Pop',
                                         style: TextStyle(
                                             fontSize: 14,
                                             color: widget.themeColor)),
@@ -671,6 +768,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                       controller: _controller,
                       enabled: gameActive,
                       autofocus: true,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      textCapitalization: TextCapitalization.none,
                       style: const TextStyle(color: Colors.white, fontSize: 18),
                       decoration: InputDecoration(
                         hintText: 'Type here...',
@@ -696,6 +796,156 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                 ],
               ),
             ),
+
+            // ─── Golden Balloon Rain overlay ───────────────────────────────
+            // IgnorePointer: rain চলাকালীন player টাইপ/পপ চালিয়ে যেতে পারে।
+            if (_rainActive)
+              IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _rainController,
+                  builder: (context, _) {
+                    final t = _rainController.value;
+                    // 0–0.12: fade in (amber glow flash)
+                    // 0.12–0.85: balloons falling
+                    // 0.85–1.0: fade out
+                    final globalOpacity = t < 0.12
+                        ? (t / 0.12).clamp(0.0, 1.0)
+                        : t > 0.85
+                            ? ((1.0 - t) / 0.15).clamp(0.0, 1.0)
+                            : 1.0;
+
+                    return Stack(
+                      children: [
+                        // হালকা সোনালী ambient glow — পুরো স্ক্রিনে
+                        Container(
+                          color: Colors.amber
+                              .withOpacity(0.07 * globalOpacity),
+                        ),
+
+                        // বেলুনগুলো
+                        ..._rainBalloons.map((b) {
+                          // প্রতিটা বেলুন নিজস্ব delay-এ শুরু হয়
+                          final span = (1.0 - b.delay).clamp(0.0001, 1.0);
+                          final localT =
+                              ((t - b.delay) / span).clamp(0.0, 1.0);
+
+                          // ওপর থেকে নিচে — ওপরে একটু আগে দেখা যায়,
+                          // নিচে স্ক্রিনের বাইরে চলে যায়
+                          final y =
+                              -b.size * 1.4 + localT * (_screenHeight + b.size * 2);
+
+                          // sinusoidal wobble — প্রতিটার phase আলাদা
+                          final wobbleX = b.x +
+                              sin(t * 5.5 + b.wobblePhase) * b.wobble;
+
+                          // ফেড: শুরুতে fade-in, শেষে fade-out
+                          final balloonOpacity =
+                              (globalOpacity * (0.75 + 0.25 * localT))
+                                  .clamp(0.0, 1.0);
+
+                          return Positioned(
+                            left: wobbleX,
+                            top: y,
+                            child: Opacity(
+                              opacity: balloonOpacity,
+                              child: CustomPaint(
+                                size: Size(b.size, b.size * 1.35),
+                                painter: BalloonPainter(
+                                  color: Colors.amber,
+                                  isActive: false,
+                                  isPower: true,
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ],
+                    );
+                  },
+                ),
+              ),
+
+            // ─── "LEVEL UP" টেক্সট — rain-এর মাঝখানে bounce করে দেখায় ───
+            if (_rainActive)
+              IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _rainController,
+                  builder: (context, _) {
+                    final t = _rainController.value;
+                    // প্রথম ০.৫ সেকেন্ড দেখায়, তারপর fade out
+                    final textOpacity = t < 0.08
+                        ? (t / 0.08).clamp(0.0, 1.0)
+                        : t > 0.45
+                            ? ((0.6 - t) / 0.15).clamp(0.0, 1.0)
+                            : 1.0;
+                    // bounce scale: ০ → 1.15 → 1.0
+                    final rawScale = t < 0.08
+                        ? (t / 0.08)
+                        : t < 0.18
+                            ? 1.0 + 0.15 * sin((t - 0.08) / 0.1 * pi)
+                            : 1.0;
+                    final scale = rawScale.clamp(0.0, 1.3);
+
+                    return Center(
+                      child: Opacity(
+                        opacity: textOpacity.clamp(0.0, 1.0),
+                        child: Transform.scale(
+                          scale: scale,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 28, vertical: 14),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFFFFB300), Color(0xFFFF6F00)],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.amber.withOpacity(0.7),
+                                  blurRadius: 24,
+                                  spreadRadius: 4,
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text(
+                                  '🎉 LEVEL UP!',
+                                  style: TextStyle(
+                                    fontSize: 30,
+                                    fontWeight: FontWeight.w900,
+                                    color: Colors.white,
+                                    letterSpacing: 2,
+                                    shadows: [
+                                      Shadow(
+                                          blurRadius: 8,
+                                          color: Colors.black45,
+                                          offset: Offset(1, 2))
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Level $level',
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white70,
+                                    letterSpacing: 1,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),
@@ -846,5 +1096,16 @@ class _Particle {
     required this.color,
     required this.life,
     this.isSpike = false,
+  });
+}
+
+class _RainBalloon {
+  final double x, size, delay, wobble, wobblePhase;
+  _RainBalloon({
+    required this.x,
+    required this.size,
+    required this.delay,
+    required this.wobble,
+    required this.wobblePhase,
   });
 }
