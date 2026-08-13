@@ -134,8 +134,8 @@ class _ResultScreenState extends State<ResultScreen> {
               Center(
                 child: Text(
                   widget.mode == 'advanced'
-                      ? '🔴 Advanced Mode'
-                      : '🟢 Easy Mode',
+                      ? '🔴 Synonym Pop'
+                      : '🟢 Word Pop',
                   style: const TextStyle(
                       color: kPurpleLight,
                       fontSize: 14,
@@ -157,7 +157,8 @@ class _ResultScreenState extends State<ResultScreen> {
                         fontWeight: FontWeight.bold)),
                 const SizedBox(height: 4),
                 const Text('Swipe to browse • 🔖 to save to notebook',
-                    style: TextStyle(color: Color(0xFF8B8BAD), fontSize: 12)),
+                    style:
+                        TextStyle(color: Color(0xFF8B8BAD), fontSize: 12)),
                 const SizedBox(height: 12),
                 SizedBox(
                   height: 200,
@@ -169,7 +170,8 @@ class _ResultScreenState extends State<ResultScreen> {
                       final isSaved = _savedWords.contains(note.word);
                       final color = _statusColor(note.status);
                       return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 6),
                         child: Container(
                           padding: const EdgeInsets.all(20),
                           decoration: BoxDecoration(
@@ -198,21 +200,24 @@ class _ResultScreenState extends State<ResultScreen> {
                                             style: const TextStyle(
                                                 color: Colors.white,
                                                 fontSize: 22,
-                                                fontWeight: FontWeight.bold)),
+                                                fontWeight:
+                                                    FontWeight.bold)),
                                         if (note.pronunciation.isNotEmpty)
-                                          Text('/${note.pronunciation}/',
+                                          Text(
+                                              '/${note.pronunciation}/',
                                               style: const TextStyle(
                                                   color: kPurpleLight,
                                                   fontSize: 13,
-                                                  fontStyle: FontStyle.italic)),
+                                                  fontStyle:
+                                                      FontStyle.italic)),
                                       ],
                                     ),
                                   ),
                                   GestureDetector(
                                     onTap: () => _toggleSave(note),
                                     child: AnimatedContainer(
-                                      duration:
-                                          const Duration(milliseconds: 200),
+                                      duration: const Duration(
+                                          milliseconds: 200),
                                       padding: const EdgeInsets.all(8),
                                       decoration: BoxDecoration(
                                         color: isSaved
@@ -245,8 +250,8 @@ class _ResultScreenState extends State<ResultScreen> {
                                 decoration: BoxDecoration(
                                   color: color.withOpacity(0.15),
                                   borderRadius: BorderRadius.circular(8),
-                                  border:
-                                      Border.all(color: color.withOpacity(0.4)),
+                                  border: Border.all(
+                                      color: color.withOpacity(0.4)),
                                 ),
                                 child: Text(_statusLabel(note.status),
                                     style: TextStyle(
@@ -258,7 +263,8 @@ class _ResultScreenState extends State<ResultScreen> {
                               Expanded(
                                 child: Text(note.meaning,
                                     style: const TextStyle(
-                                        color: Colors.white70, fontSize: 14),
+                                        color: Colors.white70,
+                                        fontSize: 14),
                                     overflow: TextOverflow.fade),
                               ),
                             ],
@@ -294,7 +300,8 @@ class _ResultScreenState extends State<ResultScreen> {
                   );
                 },
                 child: const Text('🏠 Home',
-                    style: TextStyle(color: Colors.white70, fontSize: 15)),
+                    style:
+                        TextStyle(color: Colors.white70, fontSize: 15)),
               ),
               const SizedBox(height: 12),
             ],
@@ -342,16 +349,20 @@ class _ResultScreenState extends State<ResultScreen> {
 
   Widget _buildStatsGrid() {
     final stats = [
-      _StatItem('Accuracy', '${widget.accuracy.toStringAsFixed(0)}%',
-          Icons.gps_fixed),
-      _StatItem('WPM', '${widget.wpm.toStringAsFixed(0)}', Icons.speed),
-      _StatItem('Level Reached', '${widget.levelReached}', Icons.stairs),
+      _StatItem('Accuracy',
+          '${widget.accuracy.toStringAsFixed(0)}%', Icons.gps_fixed),
+      _StatItem(
+          'WPM', '${widget.wpm.toStringAsFixed(0)}', Icons.speed),
+      _StatItem(
+          'Level Reached', '${widget.levelReached}', Icons.stairs),
       _StatItem('Time Played', _formatDuration(widget.timePlayed),
           Icons.timer_outlined),
+      _StatItem('Words Popped', '${widget.wordsPopped}',
+          Icons.check_circle_outline),
+      _StatItem('Words Missed', '${widget.wordsMissed}',
+          Icons.cancel_outlined),
       _StatItem(
-          'Words Popped', '${widget.wordsPopped}', Icons.check_circle_outline),
-      _StatItem('Words Missed', '${widget.wordsMissed}', Icons.cancel_outlined),
-      _StatItem('Synonyms', '${widget.synonymsCompleted}', Icons.auto_awesome),
+          'Synonyms', '${widget.synonymsCompleted}', Icons.auto_awesome),
     ];
 
     return Column(
@@ -359,12 +370,13 @@ class _ResultScreenState extends State<ResultScreen> {
           .map((s) => Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
                     color: kBgCard,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: kPurplePrimary.withOpacity(0.25)),
+                    border: Border.all(
+                        color: kPurplePrimary.withOpacity(0.25)),
                   ),
                   child: Row(
                     children: [
@@ -394,4 +406,3 @@ class _StatItem {
   final IconData icon;
   _StatItem(this.label, this.value, this.icon);
 }
-
