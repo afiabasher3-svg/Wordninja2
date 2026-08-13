@@ -1,10 +1,14 @@
-
 import 'package:flutter/material.dart';
 import 'topic_selection_screen.dart';
 
-class ModeSelectionScreen extends StatelessWidget {
+class ModeSelectionScreen extends StatefulWidget {
   const ModeSelectionScreen({super.key});
 
+  @override
+  State<ModeSelectionScreen> createState() => _ModeSelectionScreenState();
+}
+
+class _ModeSelectionScreenState extends State<ModeSelectionScreen> {
   static const _bg = Color(0xFF0A0A14);
   static const _card = Color(0xFF1A1A2E);
   static const _border = Color(0xFF2A2A45);
@@ -12,6 +16,48 @@ class ModeSelectionScreen extends StatelessWidget {
   static const _purpleLight = Color(0xFF9D5CF6);
   static const _accent = Color(0xFFC084FC);
   static const _textSecondary = Color(0xFF8B8BAD);
+
+  // 'survival' | 'time_attack' | 'zen'
+  String _gameType = 'survival';
+
+  void _goToTopics(String mode) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TopicSelectionScreen(mode: mode, gameType: _gameType),
+      ),
+    );
+  }
+
+  Widget _gameTypeChip(String value, String emoji, String label) {
+    final selected = _gameType == value;
+    return GestureDetector(
+      onTap: () => setState(() => _gameType = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected ? _purple.withOpacity(0.25) : _card,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+              color: selected ? _purpleLight : _border,
+              width: selected ? 1.5 : 1),
+        ),
+        child: Column(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 20)),
+            const SizedBox(height: 4),
+            Text(label,
+                style: TextStyle(
+                    color: selected ? Colors.white : _textSecondary,
+                    fontSize: 12,
+                    fontWeight:
+                        selected ? FontWeight.bold : FontWeight.normal)),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -38,7 +84,7 @@ class ModeSelectionScreen extends StatelessWidget {
                       shape: BoxShape.circle,
                       color: _accent.withOpacity(0.12)))),
           SafeArea(
-            child: Padding(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -70,12 +116,33 @@ class ModeSelectionScreen extends StatelessWidget {
                     textAlign: TextAlign.center,
                     style: TextStyle(color: _textSecondary, fontSize: 14),
                   ),
-                  const SizedBox(height: 48),
+                  const SizedBox(height: 28),
 
-                  // Easy Mode Card
+                  // Game type selector
+                  const Text('Game Type',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                          child: _gameTypeChip('survival', '❤️', 'Survival')),
+                      const SizedBox(width: 10),
+                      Expanded(
+                          child: _gameTypeChip(
+                              'time_attack', '⏱️', 'Time Attack')),
+                      const SizedBox(width: 10),
+                      Expanded(child: _gameTypeChip('zen', '🧘', 'Zen')),
+                    ],
+                  ),
+                  const SizedBox(height: 32),
+
+                  // Word Pop Mode Card
                   _ModeCard(
                     emoji: '🟢',
-                    title: 'Easy',
+                    title: 'Word Pop',
                     subtitle: 'Perfect for beginners',
                     description:
                         'Balloons rise from the bottom. Type the word to pop it before it reaches the top.',
@@ -86,19 +153,14 @@ class ModeSelectionScreen extends StatelessWidget {
                     ),
                     borderColor: const Color(0xFF52B788),
                     glowColor: const Color(0xFF52B788),
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) =>
-                              const TopicSelectionScreen(mode: 'easy')),
-                    ),
+                    onTap: () => _goToTopics('easy'),
                   ),
                   const SizedBox(height: 20),
 
-                  // Advanced Mode Card
+                  // Synonym Pop Mode Card
                   _ModeCard(
                     emoji: '🔴',
-                    title: 'Advanced',
+                    title: 'Synonym Pop',
                     subtitle: 'For IELTS warriors',
                     description:
                         'Pop the word, then its synonym balloon appears. Chain reactions test your vocabulary depth.',
@@ -109,12 +171,7 @@ class ModeSelectionScreen extends StatelessWidget {
                     ),
                     borderColor: const Color(0xFFEF4444),
                     glowColor: const Color(0xFFEF4444),
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) =>
-                              const TopicSelectionScreen(mode: 'advanced')),
-                    ),
+                    onTap: () => _goToTopics('advanced'),
                   ),
                 ],
               ),
