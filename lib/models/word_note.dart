@@ -1,13 +1,14 @@
 // lib/models/word_note.dart
 //
-// NEW FILE — does not touch or rename anything in models/word_tile.dart.
 // Represents one row of the `word_notes` table / one vocabulary entry.
+// Does not touch or rename anything in models/word_tile.dart.
 
 class WordNote {
   final String? id; // null until saved to Supabase
   final String word;
   final String meaning;
   final String pronunciation;
+  final String exampleSentence;
   final int topicId;
   final String mode; // 'easy' | 'advanced'
   final String status; // 'popped' | 'missed' | 'synonym'
@@ -19,6 +20,7 @@ class WordNote {
     required this.word,
     required this.meaning,
     required this.pronunciation,
+    this.exampleSentence = '',
     required this.topicId,
     required this.mode,
     required this.status,
@@ -36,6 +38,7 @@ class WordNote {
       word: (map['word'] ?? '') as String,
       meaning: (map['meaning'] ?? '') as String,
       pronunciation: (map['pronunciation'] ?? '') as String,
+      exampleSentence: (map['example_sentence'] ?? '') as String,
       topicId: map['topic_id'] is int
           ? map['topic_id'] as int
           : int.tryParse('${map['topic_id']}') ?? 0,
@@ -55,6 +58,7 @@ class WordNote {
       'word': word,
       'meaning': meaning,
       'pronunciation': pronunciation,
+      'example_sentence': exampleSentence,
       'topic_id': topicId,
       'mode': mode,
       'status': status,
@@ -67,12 +71,14 @@ class WordNote {
     bool? learned,
     String? status,
     DateTime? createdAt,
+    String? exampleSentence,
   }) {
     return WordNote(
       id: id ?? this.id,
       word: word,
       meaning: meaning,
       pronunciation: pronunciation,
+      exampleSentence: exampleSentence ?? this.exampleSentence,
       topicId: topicId,
       mode: mode,
       status: status ?? this.status,
@@ -81,4 +87,3 @@ class WordNote {
     );
   }
 }
-
