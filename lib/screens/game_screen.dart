@@ -16,7 +16,11 @@ class GameScreen extends StatefulWidget {
   final String mode;
   final List<Topic> topics;
 
+  /// 'survival' (default, 3 lives), 'time_attack' (60s countdown, no
+  /// lives lost from missed balloons), or 'free_play' (no lives, no timer,
+  /// endless practice — player quits manually).
   final String gameType;
+
   final List<WordNote>? reviewWords;
 
   const GameScreen({
@@ -34,7 +38,8 @@ class GameScreen extends StatefulWidget {
   String get topicEmoji => topics.map((t) => t.emoji).join(' ');
 
   bool get isTimeAttack => gameType == 'time_attack';
-  bool get isZen => gameType == 'zen';
+  // zen → free_play (backward-compat: দুটোই accept করে)
+  bool get isFreePlay => gameType == 'free_play' || gameType == 'zen';
   bool get usesLives => gameType == 'survival';
   int get topicId => topics.first.id;
 
@@ -44,6 +49,8 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final _controller = TextEditingController();
+  // Dedicated FocusNode — keyboard কে manually focus করা যাবে
+  final _inputFocus = FocusNode();
   final _random = Random();
   List<WordTile> tiles = [];
   List<_Particle> particles = [];
@@ -63,6 +70,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   static const int _timeAttackSeconds = 60;
   int _secondsLeft = _timeAttackSeconds;
   Timer? _countdownTimer;
+
+  // --- Synonym Pop (mother/burst) mode bookkeeping ---
+  int _groupIdCounter = 0;
+  final Set<String> _motherSpawnedForGroup = {};
+  static const int _burstTotalTicks = 14;
 
   // --- Golden Balloon Rain (level-up celebration) ---
   late AnimationController _rainController;
@@ -90,7 +102,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         }
       });
 
-    // "LEVEL UP" টেক্সটের জন্য আলাদা controller — bounce in করবে
     _levelTextController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
@@ -122,6 +133,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     required String word,
     String? meaning,
     String? pronunciation,
+    String? exampleSentence,
     int? topicId,
     required String status,
   }) {
@@ -129,6 +141,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       word: word,
       meaning: meaning ?? '',
       pronunciation: pronunciation ?? '',
+      exampleSentence: exampleSentence ?? '',
       topicId: topicId ?? widget.topicId,
       mode: widget.mode,
       status: status,
@@ -170,6 +183,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _rainActive = false;
       _rainBalloons = [];
       _lastCelebLevel = 0;
+      _groupIdCounter = 0;
+      _motherSpawnedForGroup.clear();
     });
     _sessionStopwatch
       ..reset()
@@ -190,10 +205,17 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
     _gameLoop.forward(from: 0);
     setState(() {
-      for (int i = 0; i < 3; i++) {
-        _doSpawnWord();
+      if (_synonymsActive) {
+        // Synonym Pop: শুধু ১টা mother balloon দিয়ে শুরু
+        _spawnMother();
+      } else {
+        for (int i = 0; i < 3; i++) {
+          _doSpawnWord();
+        }
       }
     });
+    // Game শুরু হলে keyboard তুলে রাখো
+    Future.microtask(() => _inputFocus.requestFocus());
   }
 
   double get _screenHeight => MediaQuery.of(context).size.height;
@@ -223,11 +245,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       double speed = 0.4 + (level * 0.045) + (level * level * 0.0015);
       final midpoint = _screenHeight / 2;
       const bottomHalfBoost = 2.4;
+      const burstFriction = 0.82;
+
       for (var t in tiles) {
         if (t.isPopping) continue;
-        final base = t.isPower ? speed * 0.85 : speed;
-        final effective = t.y > midpoint ? base * bottomHalfBoost : base;
-        t.y -= effective;
+
+        if (t.burstTicksRemaining > 0) {
+          // Outward burst (mother→synonym spawn animation).
+          // Horizontal: eased toward a fixed target offset — guarantees
+          // the 3 synonyms end up spaced apart, not stacked near-center.
+          final progress = 1 - (t.burstTicksRemaining / _burstTotalTicks);
+          final eased = 1 - pow(1 - progress, 3).toDouble(); // easeOutCubic
+          t.x = (t.burstStartX + t.burstTargetOffsetX * eased)
+              .clamp(10.0, _screenWidth - 120.0);
+          // Vertical: simple decaying "pop" impulse.
+          t.y += t.vy;
+          t.vy *= burstFriction;
+          t.burstTicksRemaining--;
+        } else {
+          final base = t.isPower ? speed * 0.85 : speed;
+          final effective = t.y > midpoint ? base * bottomHalfBoost : base;
+          t.y -= effective;
+        }
       }
 
       for (var p in particles) {
@@ -239,6 +278,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       particles.removeWhere((p) => p.life <= 0);
 
       int missedCount = 0;
+      bool motherMissedThisTick = false;
       tiles.removeWhere((t) {
         if (t.isPopping) return false;
         if (t.y < 55) {
@@ -253,9 +293,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             word: t.word,
             meaning: wordData['meaning'] as String?,
             pronunciation: wordData['pronunciation'] as String?,
+            exampleSentence: wordData['example_sentence'] as String?,
             topicId: wordData['topic_id'] as int?,
             status: 'missed',
           );
+
+          // Mother miss = normal miss (life lost, fresh mother right away,
+          // no burst). Synonym miss just counts toward its group.
+          if (_synonymsActive && t.isMother) motherMissedThisTick = true;
 
           if (widget.usesLives && lives <= 0) _endGame();
           return true;
@@ -268,12 +313,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         t.isActive = typed.isNotEmpty && t.word.startsWith(typed);
       }
 
-      for (int i = 0; i < missedCount; i++) {
-        _doSpawnWord();
-      }
-
-      if (_tickCount % _spawnInterval == 0) {
-        _doSpawnWord();
+      if (_synonymsActive) {
+        if (motherMissedThisTick) _spawnMother();
+        _checkGroupSpawns();
+      } else {
+        for (int i = 0; i < missedCount; i++) {
+          _doSpawnWord();
+        }
       }
     });
   }
@@ -294,16 +340,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   void _triggerGoldenRain() {
     final w = _screenWidth;
-    // ১২টা বেলুন — কম কিন্তু বড়, আরো visually striking
     _rainBalloons = List.generate(12, (i) {
-      // স্ক্রিন সমানভাবে ভাগ করে spread করো, তারপর random offset দাও
       final sectionWidth = w / 12;
       return _RainBalloon(
         x: sectionWidth * i + _random.nextDouble() * sectionWidth * 0.8,
-        size: 52 + _random.nextDouble() * 36, // 52–88px (আগে ছিল 36–64)
-        delay: i * 0.028 + _random.nextDouble() * 0.06, // staggered entry
+        size: 52 + _random.nextDouble() * 36,
+        delay: i * 0.028 + _random.nextDouble() * 0.06,
         wobble: 18 + _random.nextDouble() * 28,
-        // প্রতিটা বেলুনের নিজস্ব wobble phase যাতে sync না লাগে
         wobblePhase: _random.nextDouble() * 2 * pi,
       );
     });
@@ -313,45 +356,179 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     _levelTextController.forward(from: 0);
   }
 
+  /// Overlap-safe spawn: existing active tiles-এর সাথে minimum horizontal
+  /// distance নিশ্চিত করে। ৫ বার চেষ্টার পরেও না হলে skip করে।
+  /// (easy/normal difficulty — multi-balloon system, unchanged.)
   void _doSpawnWord() {
     if (!gameActive) return;
     final activeCount = tiles.where((t) => !t.isPopping).length;
     if (activeCount >= 3) return;
     if (_wordPool.isEmpty) return;
 
-    final wordData = _wordPool[_random.nextInt(_wordPool.length)];
+    // শব্দ বেছে নাও (duplicate check)
+    final available = _wordPool
+        .where((w) => !tiles.any((t) => t.word == w['word'] && !t.isPopping))
+        .toList();
+    if (available.isEmpty) return;
+
+    final wordData = available[_random.nextInt(available.length)];
     final word = wordData['word'] as String;
-
-    if (tiles.any((t) => t.word == word && !t.isPopping)) return;
-
-    final x = 20 + _random.nextDouble() * (_screenWidth - 140);
     final topic = _topicForWord(wordData);
+
+    final bestX = _overlapSafeX();
 
     tiles.add(WordTile(
       word: word,
-      x: x,
+      x: bestX,
       y: _screenHeight - 150,
       balloonColor: topic.themeColor,
       isPower: false,
     ));
   }
 
+  /// Shared overlap-safe x-position picker (8 attempts, prefers the
+  /// candidate farthest from all active tiles).
+  double _overlapSafeX() {
+    const balloonWidth = 110.0; // balloon এর approximate width
+    const minGap = 20.0; // দুই balloon-এর মাঝে ন্যূনতম gap
+    const minDist = balloonWidth + minGap;
+
+    final activeTiles = tiles.where((t) => !t.isPopping).toList();
+    double bestX =
+        20 + _random.nextDouble() * (_screenWidth - balloonWidth - 20);
+    double bestScore = -1;
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+      final candidateX =
+          20 + _random.nextDouble() * (_screenWidth - balloonWidth - 20);
+      if (activeTiles.isEmpty) {
+        bestX = candidateX;
+        break;
+      }
+      double minDist2 = double.infinity;
+      for (final t in activeTiles) {
+        final d = (candidateX - t.x).abs();
+        if (d < minDist2) minDist2 = d;
+      }
+      if (minDist2 > bestScore) {
+        bestScore = minDist2;
+        bestX = candidateX;
+      }
+      if (minDist2 >= minDist) break;
+    }
+    return bestX;
+  }
+
   void _spawnWord() {
     setState(_doSpawnWord);
   }
 
-  void _spawnSynonymBalloon(String synonym) {
-    if (!mounted) return;
-    final x = 20 + _random.nextDouble() * (_screenWidth - 140);
-    setState(() {
+  // ─── Synonym Pop (mother/burst) mode ─────────────────────────────────
+
+  bool get _hasMotherOnScreen => tiles.any((t) => t.isMother && !t.isPopping);
+
+  /// Spawns a single mother balloon. Returns false (no-op) if one is
+  /// already on screen, the game isn't active, or no word is available.
+  bool _spawnMother() {
+    if (!gameActive || _hasMotherOnScreen) return false;
+    if (_wordPool.isEmpty) return false;
+
+    final available = _wordPool
+        .where((w) => !tiles.any((t) => t.word == w['word'] && !t.isPopping))
+        .toList();
+    if (available.isEmpty) return false;
+
+    final wordData = available[_random.nextInt(available.length)];
+    final word = wordData['word'] as String;
+    final topic = _topicForWord(wordData);
+    final bestX = _overlapSafeX();
+
+    _groupIdCounter++;
+    final groupId =
+        'g$_groupIdCounter-${DateTime.now().microsecondsSinceEpoch}';
+
+    tiles.add(WordTile(
+      word: word,
+      x: bestX,
+      y: _screenHeight - 150,
+      balloonColor: topic.themeColor,
+      isPower: false,
+      isMother: true,
+      synonymGroupId: groupId,
+    ));
+    return true;
+  }
+
+  /// Called when a mother tile is popped. Bursts up to 3 synonym
+  /// balloons outward (roughly -30°/0°/+30°) from the mother's position,
+  /// coloured like the mother. If the word has no synonyms in the data,
+  /// the group is already "resolved" — spawn the next mother immediately.
+  void _burstSynonyms(WordTile mother) {
+    final wordData =
+        _wordPool.firstWhere((w) => w['word'] == mother.word, orElse: () => {});
+    final synonyms = wordData.isNotEmpty
+        ? List<String>.from(wordData['synonyms'] ?? [])
+        : <String>[];
+    synonyms.shuffle(_random);
+    final count = min(3, synonyms.length);
+    final groupId = mother.synonymGroupId!;
+
+    if (count == 0) {
+      if (_spawnMother()) _motherSpawnedForGroup.add(groupId);
+      return;
+    }
+
+    final offsets = _burstOffsets(count);
+
+    for (int i = 0; i < count; i++) {
+      final vy = -(7.0 + _random.nextDouble() * 2.0); // upward "pop"
       tiles.add(WordTile(
-        word: synonym,
-        x: x,
-        y: _screenHeight - 150,
-        balloonColor: Colors.amber,
-        isPower: true,
+        word: synonyms[i],
+        x: mother.x.clamp(10.0, _screenWidth - 120.0),
+        y: mother.y,
+        balloonColor: mother.balloonColor,
+        isPower: true, // golden glow, same as before
+        isMother: false,
+        synonymGroupId: groupId,
+        burstStartX: mother.x,
+        burstTargetOffsetX: offsets[i],
+        vy: vy,
+        burstTicksRemaining: _burstTotalTicks,
       ));
-    });
+    }
+  }
+
+  /// Fixed left/mid/right horizontal offsets (px) synonyms burst outward
+  /// to, scaled down on narrow screens so they never clip off-edge.
+  /// Deterministic (not velocity-decay based) so the 3 balloons always
+  /// end up clearly spaced apart instead of stacked near the mother.
+  List<double> _burstOffsets(int count) {
+    final maxSpread = ((_screenWidth - 160) / 2).clamp(40.0, 110.0);
+    if (count == 1) return [0.0];
+    if (count == 2) return [-maxSpread * 0.75, maxSpread * 0.75];
+    return [-maxSpread, 0.0, maxSpread];
+  }
+
+  /// Once a group's active (non-popping) synonym count drops to ≤1,
+  /// spawns the next mother — as long as no mother is currently active.
+  void _checkGroupSpawns() {
+    if (_hasMotherOnScreen || !gameActive) return;
+
+    final groupIds = tiles
+        .where((t) => t.synonymGroupId != null && !t.isMother)
+        .map((t) => t.synonymGroupId!)
+        .toSet();
+
+    for (final gid in groupIds) {
+      if (_motherSpawnedForGroup.contains(gid)) continue;
+      final activeInGroup = tiles
+          .where((t) => t.synonymGroupId == gid && !t.isMother && !t.isPopping)
+          .length;
+      if (activeInGroup <= 1) {
+        if (_spawnMother()) _motherSpawnedForGroup.add(gid);
+        return;
+      }
+    }
   }
 
   void _checkWord() {
@@ -372,6 +549,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         word: tile.word,
         meaning: wordData['meaning'] as String?,
         pronunciation: wordData['pronunciation'] as String?,
+        exampleSentence: wordData['example_sentence'] as String?,
         topicId: wordData['topic_id'] as int?,
         status: tile.isPower ? 'synonym' : 'popped',
       );
@@ -382,22 +560,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         _correctWords++;
         _maybeLevelUp();
         _controller.clear();
-        _doSpawnWord();
-      });
 
-      if (_synonymsActive && !tile.isPower) {
-        final original = _wordPool.firstWhere((w) => w['word'] == tile.word,
-            orElse: () => {});
-        if (original.isNotEmpty) {
-          final synonyms = List<String>.from(original['synonyms'] ?? []);
-          if (synonyms.isNotEmpty) {
-            final synonym = synonyms[_random.nextInt(synonyms.length)];
-            Future.delayed(const Duration(milliseconds: 500), () {
-              _spawnSynonymBalloon(synonym);
-            });
+        if (_synonymsActive) {
+          if (tile.isMother) {
+            _burstSynonyms(tile);
           }
+          // synonym popped → group resolution checked every tick
+        } else {
+          _doSpawnWord();
         }
-      }
+      });
 
       Future.delayed(const Duration(milliseconds: 400),
           () => setState(() => tiles.remove(tile)));
@@ -406,19 +578,27 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   void _onSubmitted(String value) {
     final typed = value.toLowerCase().trim();
+
+    // সবসময় focus রাখো — keyboard কখনো নামবে না
+    _inputFocus.requestFocus();
+
     if (typed.isEmpty) return;
 
     final match = tiles.where((t) => t.word == typed && !t.isPopping).toList();
 
     if (match.isEmpty) {
+      // ভুল word — red flash + clear, keyboard নামবে না
       _totalAttempts++;
       HapticFeedback.lightImpact();
-      setState(() => _flashRed = true);
+      setState(() {
+        _flashRed = true;
+        _controller.clear();
+      });
       Future.delayed(const Duration(milliseconds: 400), () {
         if (mounted) setState(() => _flashRed = false);
       });
-      _controller.clear();
     }
+    // সঠিক হলে _checkWord() already handle করেছে onChanged এ
   }
 
   void _calculateStats() {
@@ -479,10 +659,12 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     _rainController.dispose();
     _levelTextController.dispose();
     _controller.dispose();
+    _inputFocus.dispose();
     _countdownTimer?.cancel();
     super.dispose();
   }
 
+  // Free Play mode-এ quit করলে stats save করে result screen-এ যাবে
   Future<bool> _onWillPop() async {
     if (gameActive) {
       _calculateStats();
@@ -525,19 +707,36 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                   style: TextStyle(
                       color: Color(0xFFC084FC), fontWeight: FontWeight.bold)),
             ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Quit',
-                  style: TextStyle(
-                      color: Colors.redAccent, fontWeight: FontWeight.bold)),
-            ),
+            // Free Play: "Finish" → result screen; অন্যরা: "Quit" → home
+            if (widget.isFreePlay)
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Finish & See Results',
+                    style: TextStyle(
+                        color: Colors.greenAccent,
+                        fontWeight: FontWeight.bold)),
+              )
+            else
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Quit',
+                    style: TextStyle(
+                        color: Colors.redAccent, fontWeight: FontWeight.bold)),
+              ),
           ],
         ),
       );
+
       if (quit == true) {
         _gameLoop.stop();
         _countdownTimer?.cancel();
-        if (mounted) {
+        if (!mounted) return false;
+
+        if (widget.isFreePlay) {
+          // Free Play: result screen-এ যাও
+          await _endGame();
+        } else {
+          // Survival / Time Attack: home-এ যাও
           Navigator.pushReplacement(
               context, MaterialPageRoute(builder: (_) => const HomeScreen()));
         }
@@ -551,9 +750,15 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
+    // keyboard height: keyboard খোলা থাকলে viewInsets.bottom > 0
+    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final isKeyboardOpen = keyboardHeight > 0;
+
     return WillPopScope(
       onWillPop: _onWillPop,
       child: Scaffold(
+        // false রাখতে হবে যাতে Stack layout ঠিক থাকে,
+        // কিন্তু input field keyboard-aware করব manually
         resizeToAvoidBottomInset: false,
         body: Stack(
           children: [
@@ -599,17 +804,32 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                         ? Colors.redAccent
                                         : Colors.white))
                           else
-                            const Text('🧘 Zen',
+                            // Free Play badge
+                            const Text('🎮 Free Play',
                                 style: TextStyle(
-                                    fontSize: 16,
+                                    fontSize: 15,
                                     fontWeight: FontWeight.bold,
                                     color: Colors.white70)),
                           const SizedBox(width: 4),
-                          IconButton(
-                            icon: const Icon(Icons.home_rounded,
-                                color: Colors.white38, size: 20),
-                            onPressed: () async => await _onWillPop(),
-                          ),
+                          // Free Play: quit button স্পষ্ট করে দেখাও
+                          if (widget.isFreePlay)
+                            TextButton.icon(
+                              onPressed: () async => await _onWillPop(),
+                              icon: const Icon(Icons.stop_circle_outlined,
+                                  color: Colors.greenAccent, size: 18),
+                              label: const Text('Finish',
+                                  style: TextStyle(
+                                      color: Colors.greenAccent, fontSize: 13)),
+                              style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 0)),
+                            )
+                          else
+                            IconButton(
+                              icon: const Icon(Icons.home_rounded,
+                                  color: Colors.white38, size: 20),
+                              onPressed: () async => await _onWillPop(),
+                            ),
                           IconButton(
                             icon: const Icon(Icons.logout,
                                 color: Colors.white38, size: 20),
@@ -628,7 +848,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                     ),
                   ),
 
-                  // Game area
+                  // Game area — keyboard height বাদ দিয়ে বাকি জায়গা নেবে
                   Expanded(
                     child: Stack(
                       children: [
@@ -641,7 +861,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                             painter: SpikesPainter(),
                           ),
                         ),
-
                         ...particles.map((p) => Positioned(
                               left: p.x,
                               top: p.y,
@@ -670,12 +889,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                             ])),
                               ),
                             )),
-
                         ...tiles.map((tile) => Positioned(
                             left: tile.x,
                             top: tile.y,
                             child: _buildBalloon(tile))),
-
                         if (!gameActive)
                           Container(
                             color: Colors.black54,
@@ -761,11 +978,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                     ),
                   ),
 
-                  // Input field
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  // Input field — keyboard খোলা থাকলে keyboard-এর ওপরে বসে,
+                  // না থাকলে স্ক্রিনের একদম নিচে থাকে।
+                  // AnimatedPadding দিয়ে smooth transition দাও।
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                    padding: EdgeInsets.fromLTRB(
+                      12,
+                      0,
+                      12,
+                      isKeyboardOpen
+                          ? keyboardHeight + 8 // keyboard-এর ঠিক ওপরে
+                          : 12, // স্ক্রিনের নিচে
+                    ),
                     child: TextField(
                       controller: _controller,
+                      focusNode: _inputFocus,
                       enabled: gameActive,
                       autofocus: true,
                       autocorrect: false,
@@ -798,16 +1027,12 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             ),
 
             // ─── Golden Balloon Rain overlay ───────────────────────────────
-            // IgnorePointer: rain চলাকালীন player টাইপ/পপ চালিয়ে যেতে পারে।
             if (_rainActive)
               IgnorePointer(
                 child: AnimatedBuilder(
                   animation: _rainController,
                   builder: (context, _) {
                     final t = _rainController.value;
-                    // 0–0.12: fade in (amber glow flash)
-                    // 0.12–0.85: balloons falling
-                    // 0.85–1.0: fade out
                     final globalOpacity = t < 0.12
                         ? (t / 0.12).clamp(0.0, 1.0)
                         : t > 0.85
@@ -816,29 +1041,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
                     return Stack(
                       children: [
-                        // হালকা সোনালী ambient glow — পুরো স্ক্রিনে
                         Container(
-                          color: Colors.amber
-                              .withOpacity(0.07 * globalOpacity),
+                          color: Colors.amber.withOpacity(0.07 * globalOpacity),
                         ),
-
-                        // বেলুনগুলো
                         ..._rainBalloons.map((b) {
-                          // প্রতিটা বেলুন নিজস্ব delay-এ শুরু হয়
                           final span = (1.0 - b.delay).clamp(0.0001, 1.0);
-                          final localT =
-                              ((t - b.delay) / span).clamp(0.0, 1.0);
-
-                          // ওপর থেকে নিচে — ওপরে একটু আগে দেখা যায়,
-                          // নিচে স্ক্রিনের বাইরে চলে যায়
-                          final y =
-                              -b.size * 1.4 + localT * (_screenHeight + b.size * 2);
-
-                          // sinusoidal wobble — প্রতিটার phase আলাদা
-                          final wobbleX = b.x +
-                              sin(t * 5.5 + b.wobblePhase) * b.wobble;
-
-                          // ফেড: শুরুতে fade-in, শেষে fade-out
+                          final localT = ((t - b.delay) / span).clamp(0.0, 1.0);
+                          final y = -b.size * 1.4 +
+                              localT * (_screenHeight + b.size * 2);
+                          final wobbleX =
+                              b.x + sin(t * 5.5 + b.wobblePhase) * b.wobble;
                           final balloonOpacity =
                               (globalOpacity * (0.75 + 0.25 * localT))
                                   .clamp(0.0, 1.0);
@@ -865,20 +1077,18 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                 ),
               ),
 
-            // ─── "LEVEL UP" টেক্সট — rain-এর মাঝখানে bounce করে দেখায় ───
+            // ─── "LEVEL UP" bounce banner ──────────────────────────────────
             if (_rainActive)
               IgnorePointer(
                 child: AnimatedBuilder(
                   animation: _rainController,
                   builder: (context, _) {
                     final t = _rainController.value;
-                    // প্রথম ০.৫ সেকেন্ড দেখায়, তারপর fade out
                     final textOpacity = t < 0.08
                         ? (t / 0.08).clamp(0.0, 1.0)
                         : t > 0.45
                             ? ((0.6 - t) / 0.15).clamp(0.0, 1.0)
                             : 1.0;
-                    // bounce scale: ০ → 1.15 → 1.0
                     final rawScale = t < 0.08
                         ? (t / 0.08)
                         : t < 0.18
