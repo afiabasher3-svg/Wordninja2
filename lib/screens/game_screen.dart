@@ -243,8 +243,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     _tickCount++;
     setState(() {
       double speed = 0.4 + (level * 0.045) + (level * level * 0.0015);
-      final midpoint = _screenHeight / 2;
-      const bottomHalfBoost = 2.4;
+      // Boundary line: bottom 60% of screen = fast zone,
+      // top 40% = slow zone.
+      final midpoint = _screenHeight * 0.4;
+      const bottomHalfBoost = 3.2; // bottom (fast) zone
+      const topHalfSlow = 0.5; // top (slow) zone
       const burstFriction = 0.82;
 
       for (var t in tiles) {
@@ -254,7 +257,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           // Outward burst (mother→synonym spawn animation).
           // Horizontal: eased toward a fixed target offset — guarantees
           // the 3 synonyms end up spaced apart, not stacked near-center.
-          final progress = 1 - (t.burstTicksRemaining / _burstTotalTicks);
+          final progress =
+              1 - (t.burstTicksRemaining / _burstTotalTicks);
           final eased = 1 - pow(1 - progress, 3).toDouble(); // easeOutCubic
           t.x = (t.burstStartX + t.burstTargetOffsetX * eased)
               .clamp(10.0, _screenWidth - 120.0);
@@ -264,7 +268,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           t.burstTicksRemaining--;
         } else {
           final base = t.isPower ? speed * 0.85 : speed;
-          final effective = t.y > midpoint ? base * bottomHalfBoost : base;
+          final effective =
+              t.y > midpoint ? base * bottomHalfBoost : base * topHalfSlow;
           t.y -= effective;
         }
       }
@@ -287,10 +292,12 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           HapticFeedback.heavyImpact();
           _spawnParticles(t.x + 45, 60, t.balloonColor, isSpike: true);
 
-          final wordData = _wordPool.firstWhere((w) => w['word'] == t.word,
+          final missedTrackWord = t.originalWord ?? t.word;
+          final wordData = _wordPool.firstWhere(
+              (w) => w['word'] == missedTrackWord,
               orElse: () => {});
           _trackSessionWord(
-            word: t.word,
+            word: missedTrackWord,
             meaning: wordData['meaning'] as String?,
             pronunciation: wordData['pronunciation'] as String?,
             exampleSentence: wordData['example_sentence'] as String?,
@@ -376,6 +383,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     final topic = _topicForWord(wordData);
 
     final bestX = _overlapSafeX();
+    if (bestX == null) return; // screen too crowded right now — try next tick
 
     tiles.add(WordTile(
       word: word,
@@ -386,25 +394,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     ));
   }
 
-  /// Shared overlap-safe x-position picker (8 attempts, prefers the
-  /// candidate farthest from all active tiles).
-  double _overlapSafeX() {
+  /// Shared overlap-safe x-position picker. Tries 20 random candidates
+  /// and keeps the one farthest from all active tiles. If even the best
+  /// candidate is still too close (screen genuinely too crowded), returns
+  /// null instead of forcing an overlapping placement — the caller should
+  /// just skip spawning this cycle and try again shortly.
+  double? _overlapSafeX() {
     const balloonWidth = 110.0; // balloon এর approximate width
-    const minGap = 20.0; // দুই balloon-এর মাঝে ন্যূনতম gap
+    const minGap = 26.0; // দুই balloon-এর মাঝে ন্যূনতম gap
     const minDist = balloonWidth + minGap;
 
     final activeTiles = tiles.where((t) => !t.isPopping).toList();
+    if (activeTiles.isEmpty) {
+      return 20 + _random.nextDouble() * (_screenWidth - balloonWidth - 20);
+    }
+
     double bestX =
         20 + _random.nextDouble() * (_screenWidth - balloonWidth - 20);
     double bestScore = -1;
 
-    for (int attempt = 0; attempt < 8; attempt++) {
+    for (int attempt = 0; attempt < 20; attempt++) {
       final candidateX =
           20 + _random.nextDouble() * (_screenWidth - balloonWidth - 20);
-      if (activeTiles.isEmpty) {
-        bestX = candidateX;
-        break;
-      }
       double minDist2 = double.infinity;
       for (final t in activeTiles) {
         final d = (candidateX - t.x).abs();
@@ -416,6 +427,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
       if (minDist2 >= minDist) break;
     }
+
+    // Hard floor — never place a tile so close it visually overlaps,
+    // even if we couldn't find the "ideal" gap in 20 tries.
+    if (bestScore < balloonWidth * 0.9) return null;
     return bestX;
   }
 
@@ -425,7 +440,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   // ─── Synonym Pop (mother/burst) mode ─────────────────────────────────
 
-  bool get _hasMotherOnScreen => tiles.any((t) => t.isMother && !t.isPopping);
+  bool get _hasMotherOnScreen =>
+      tiles.any((t) => t.isMother && !t.isPopping);
 
   /// Spawns a single mother balloon. Returns false (no-op) if one is
   /// already on screen, the game isn't active, or no word is available.
@@ -442,10 +458,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     final word = wordData['word'] as String;
     final topic = _topicForWord(wordData);
     final bestX = _overlapSafeX();
+    if (bestX == null) return false; // screen too crowded — try next tick
 
     _groupIdCounter++;
-    final groupId =
-        'g$_groupIdCounter-${DateTime.now().microsecondsSinceEpoch}';
+    final groupId = 'g$_groupIdCounter-${DateTime.now().microsecondsSinceEpoch}';
 
     tiles.add(WordTile(
       word: word,
@@ -490,6 +506,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         isPower: true, // golden glow, same as before
         isMother: false,
         synonymGroupId: groupId,
+        originalWord: mother.word,
         burstStartX: mother.x,
         burstTargetOffsetX: offsets[i],
         vy: vy,
@@ -522,7 +539,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     for (final gid in groupIds) {
       if (_motherSpawnedForGroup.contains(gid)) continue;
       final activeInGroup = tiles
-          .where((t) => t.synonymGroupId == gid && !t.isMother && !t.isPopping)
+          .where((t) =>
+              t.synonymGroupId == gid && !t.isMother && !t.isPopping)
           .length;
       if (activeInGroup <= 1) {
         if (_spawnMother()) _motherSpawnedForGroup.add(gid);
@@ -543,10 +561,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       HapticFeedback.mediumImpact();
       SystemSound.play(SystemSoundType.click);
 
+      // Synonym tiles carry the synonym text in `word` (needed for typing
+      // match), but the notebook should show the real dictionary word —
+      // so look up / save using originalWord when this is a synonym.
+      final trackWord = tile.originalWord ?? tile.word;
       final wordData =
-          _wordPool.firstWhere((w) => w['word'] == tile.word, orElse: () => {});
+          _wordPool.firstWhere((w) => w['word'] == trackWord, orElse: () => {});
       _trackSessionWord(
-        word: tile.word,
+        word: trackWord,
         meaning: wordData['meaning'] as String?,
         pronunciation: wordData['pronunciation'] as String?,
         exampleSentence: wordData['example_sentence'] as String?,
@@ -1006,6 +1028,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                         hintStyle: const TextStyle(color: Colors.white38),
                         filled: true,
                         fillColor: const Color(0xFF1A1A2E),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
                         border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
                             borderSide:
