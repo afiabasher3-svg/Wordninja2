@@ -17,6 +17,13 @@ class WordTile {
   /// (popped or missed) so the next mother can spawn.
   String? synonymGroupId;
 
+  /// For synonym tiles only: the mother's original word (e.g. "marinate"
+  /// while [word] holds the synonym text like "steep"). [word] still
+  /// drives typing/matching — this is only used when saving to the
+  /// notebook, so the notebook shows the real word and its real
+  /// meaning/pronunciation/example instead of a blank synonym entry.
+  String? originalWord;
+
   /// Mother's x at the moment of burst — the horizontal animation
   /// interpolates from here toward [burstStartX] + [burstTargetOffsetX].
   double burstStartX;
@@ -45,6 +52,7 @@ class WordTile {
     required this.balloonColor,
     this.isMother = false,
     this.synonymGroupId,
+    this.originalWord,
     this.burstStartX = 0,
     this.burstTargetOffsetX = 0,
     this.vy = 0,
