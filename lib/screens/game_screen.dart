@@ -74,7 +74,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   // --- Synonym Pop (mother/burst) mode bookkeeping ---
   int _groupIdCounter = 0;
   final Set<String> _motherSpawnedForGroup = {};
-  static const int _burstTotalTicks = 20;
+  static const int _burstTotalTicks = 30;
 
   // --- Golden Balloon Rain (level-up celebration) ---
   late AnimationController _rainController;
@@ -248,23 +248,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       final midpoint = _screenHeight * 0.4;
       const bottomHalfBoost = 4.2; // bottom (fast) zone — bumped up further
       const topHalfSlow = 0.5; // top (slow) zone
-      const burstFriction = 0.82;
 
       for (var t in tiles) {
         if (t.isPopping) continue;
 
         if (t.burstTicksRemaining > 0) {
-          // Outward burst (mother→synonym spawn animation).
-          // Horizontal: eased toward a fixed target offset — guarantees
-          // the 3 synonyms end up spaced apart, not stacked near-center.
+          // Outward burst (mother→synonym spawn animation). Both axes are
+          // eased toward a fixed target offset — guarantees exact spacing
+          // (horizontal) and an exact dip distance (vertical), instead of
+          // relying on velocity/friction which barely moved things.
           final progress =
               1 - (t.burstTicksRemaining / _burstTotalTicks);
           final eased = 1 - pow(1 - progress, 3).toDouble(); // easeOutCubic
           t.x = (t.burstStartX + t.burstTargetOffsetX * eased)
               .clamp(10.0, _screenWidth - 120.0);
-          // Vertical: simple decaying "pop" impulse.
-          t.y += t.vy;
-          t.vy *= burstFriction;
+          t.y = (t.burstStartY + t.burstTargetOffsetY * eased)
+              .clamp(60.0, _screenHeight - 20.0);
           t.burstTicksRemaining--;
         } else {
           final base = t.isPower ? speed * 0.85 : speed;
@@ -500,8 +499,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
     for (int i = 0; i < count; i++) {
       final dx = pattern[i][0];
-      final dipsDown = pattern[i][1] == 1.0;
-      final vy = dipsDown ? (6.0 + _random.nextDouble() * 2.0) : 0.0;
+      final dy = pattern[i][1];
       tiles.add(WordTile(
         word: synonyms[i],
         x: mother.x.clamp(10.0, _screenWidth - 120.0),
@@ -513,7 +511,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         originalWord: mother.word,
         burstStartX: mother.x,
         burstTargetOffsetX: dx,
-        vy: vy,
+        burstStartY: mother.y,
+        burstTargetOffsetY: dy,
         burstTicksRemaining: _burstTotalTicks,
       ));
     }
@@ -522,19 +521,27 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   /// Decides where each synonym balloon ends up, adapting to how close
   /// the mother was to a screen edge when it popped:
   /// - Room on BOTH sides → full spread: left / dip-down middle / right
-  ///   (or left/right for 2 synonyms) — same as before.
+  ///   (or left/right for 2 synonyms), sides pushed out near the true
+  ///   screen edges.
   /// - NOT enough room on one side (mother popped near an edge, so the
   ///   usual spread would clamp multiple balloons into the same corner)
-  ///   → one balloon stays roughly at the mother's spot, one dips
-  ///   straight down, and one shifts to whichever side actually has
-  ///   room. Keeps them visually separated instead of bunching up.
-  /// Returns one [dx, dipsDown(1.0/0.0)] pair per synonym.
+  ///   → one balloon stays roughly at the mother's spot, one dips way
+  ///   down, and one shifts to whichever side actually has room. Keeps
+  ///   them visually separated instead of bunching up.
+  /// Returns one [dx, dy] pair per synonym — dy positive = further down.
   List<List<double>> _burstPattern(int count, double motherX) {
     if (count == 1) return [
         [0.0, 0.0]
       ];
 
-    final maxSpread = _screenWidth * 0.42;
+    // Sides pushed almost to the screen edges; the per-tick x-clamp in
+    // _tick() (10 → screenWidth-120) is the real safety net, so we can
+    // push this close to the full width without worrying about overflow.
+    final maxSpread = _screenWidth * 0.48;
+    // Deep vertical dip — a large chunk of the screen height, not a
+    // small "pop". Clamped so it never dips below the miss-line area.
+    final dipDepth = (_screenHeight * 0.32).clamp(180.0, 420.0);
+
     final leftRoom = motherX - 10.0;
     final rightRoom = (_screenWidth - 120.0) - motherX;
     final hasRoomBothSides = leftRoom >= maxSpread && rightRoom >= maxSpread;
@@ -544,10 +551,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
     if (count == 2) {
       if (hasRoomBothSides) {
-        final s = maxSpread * 0.9;
         return [
-          [-s, 0.0],
-          [s, 0.0],
+          [-maxSpread, 0.0],
+          [maxSpread, 0.0],
         ];
       }
       return [
@@ -559,14 +565,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     // count == 3
     if (hasRoomBothSides) {
       return [
-        [-maxSpread, 0.0], // left, level
-        [0.0, 1.0], // middle, dips down
-        [maxSpread, 0.0], // right, level
+        [-maxSpread, 0.0], // left, pushed to the edge, level
+        [0.0, dipDepth], // middle, dips way down
+        [maxSpread, 0.0], // right, pushed to the edge, level
       ];
     }
     return [
       [0.0, 0.0], // stays at mother's spot
-      [0.0, 1.0], // dips straight down
+      [0.0, dipDepth], // dips way down
       [side * edgeSpread, 0.0], // shifts to the open side
     ];
   }
