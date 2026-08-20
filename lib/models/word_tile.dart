@@ -33,10 +33,16 @@ class WordTile {
   /// end up spaced apart, never overlapping.
   double burstTargetOffsetX;
 
-  /// Vertical burst-impulse velocity (px/tick), decays via friction each
-  /// tick. Only the vertical "pop" is physics-based; horizontal is eased
-  /// toward [burstTargetOffsetX] for guaranteed spacing.
-  double vy;
+  /// Mother's y at the moment of burst — the vertical animation
+  /// interpolates from here toward [burstStartY] + [burstTargetOffsetY].
+  double burstStartY;
+
+  /// Final vertical offset (px, positive = further down) from
+  /// [burstStartY]. 0 for balloons that stay level; a large positive
+  /// value for the one balloon that dips down during the burst.
+  /// Deterministic (not velocity/friction based) so the dip distance is
+  /// exact and controllable, same approach as the horizontal spread.
+  double burstTargetOffsetY;
 
   /// Ticks left in the outward burst animation. Once 0, the tile floats
   /// up normally like any other balloon.
@@ -55,7 +61,8 @@ class WordTile {
     this.originalWord,
     this.burstStartX = 0,
     this.burstTargetOffsetX = 0,
-    this.vy = 0,
+    this.burstStartY = 0,
+    this.burstTargetOffsetY = 0,
     this.burstTicksRemaining = 0,
   });
 }
