@@ -74,7 +74,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   // --- Synonym Pop (mother/burst) mode bookkeeping ---
   int _groupIdCounter = 0;
   final Set<String> _motherSpawnedForGroup = {};
-  static const int _burstTotalTicks = 14;
+  static const int _burstTotalTicks = 20;
 
   // --- Golden Balloon Rain (level-up celebration) ---
   late AnimationController _rainController;
@@ -246,7 +246,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       // Boundary line: bottom 60% of screen = fast zone,
       // top 40% = slow zone.
       final midpoint = _screenHeight * 0.4;
-      const bottomHalfBoost = 3.2; // bottom (fast) zone
+      const bottomHalfBoost = 4.2; // bottom (fast) zone — bumped up further
       const topHalfSlow = 0.5; // top (slow) zone
       const burstFriction = 0.82;
 
@@ -364,7 +364,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   /// Overlap-safe spawn: existing active tiles-এর সাথে minimum horizontal
-  /// distance নিশ্চিত করে। ৫ বার চেষ্টার পরেও না হলে skip করে।
+  /// distance নিশ্চিত করে (২০ বার চেষ্টা করে)। কোথাও পুরো gap না পেলে
+  /// spawn skip করে — balloon overlap করার চেয়ে দূরে/দেরিতে spawn ভালো।
   /// (easy/normal difficulty — multi-balloon system, unchanged.)
   void _doSpawnWord() {
     if (!gameActive) return;
@@ -401,7 +402,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   /// just skip spawning this cycle and try again shortly.
   double? _overlapSafeX() {
     const balloonWidth = 110.0; // balloon এর approximate width
-    const minGap = 26.0; // দুই balloon-এর মাঝে ন্যূনতম gap
+    const minGap = 40.0; // দুই balloon-এর মাঝে ন্যূনতম gap — বেশি রাখা হয়েছে
     const minDist = balloonWidth + minGap;
 
     final activeTiles = tiles.where((t) => !t.isPopping).toList();
@@ -428,9 +429,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (minDist2 >= minDist) break;
     }
 
-    // Hard floor — never place a tile so close it visually overlaps,
-    // even if we couldn't find the "ideal" gap in 20 tries.
-    if (bestScore < balloonWidth * 0.9) return null;
+    // Hard floor — require the FULL gap (balloonWidth + minGap), not just
+    // "not touching". If we can't guarantee real spacing anywhere on
+    // screen, skip this spawn entirely rather than place it too close.
+    if (bestScore < minDist) return null;
     return bestX;
   }
 
@@ -494,10 +496,12 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       return;
     }
 
-    final offsets = _burstOffsets(count);
+    final pattern = _burstPattern(count, mother.x);
 
     for (int i = 0; i < count; i++) {
-      final vy = -(7.0 + _random.nextDouble() * 2.0); // upward "pop"
+      final dx = pattern[i][0];
+      final dipsDown = pattern[i][1] == 1.0;
+      final vy = dipsDown ? (6.0 + _random.nextDouble() * 2.0) : 0.0;
       tiles.add(WordTile(
         word: synonyms[i],
         x: mother.x.clamp(10.0, _screenWidth - 120.0),
@@ -508,22 +512,63 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         synonymGroupId: groupId,
         originalWord: mother.word,
         burstStartX: mother.x,
-        burstTargetOffsetX: offsets[i],
+        burstTargetOffsetX: dx,
         vy: vy,
         burstTicksRemaining: _burstTotalTicks,
       ));
     }
   }
 
-  /// Fixed left/mid/right horizontal offsets (px) synonyms burst outward
-  /// to, scaled down on narrow screens so they never clip off-edge.
-  /// Deterministic (not velocity-decay based) so the 3 balloons always
-  /// end up clearly spaced apart instead of stacked near the mother.
-  List<double> _burstOffsets(int count) {
-    final maxSpread = ((_screenWidth - 160) / 2).clamp(40.0, 110.0);
-    if (count == 1) return [0.0];
-    if (count == 2) return [-maxSpread * 0.75, maxSpread * 0.75];
-    return [-maxSpread, 0.0, maxSpread];
+  /// Decides where each synonym balloon ends up, adapting to how close
+  /// the mother was to a screen edge when it popped:
+  /// - Room on BOTH sides → full spread: left / dip-down middle / right
+  ///   (or left/right for 2 synonyms) — same as before.
+  /// - NOT enough room on one side (mother popped near an edge, so the
+  ///   usual spread would clamp multiple balloons into the same corner)
+  ///   → one balloon stays roughly at the mother's spot, one dips
+  ///   straight down, and one shifts to whichever side actually has
+  ///   room. Keeps them visually separated instead of bunching up.
+  /// Returns one [dx, dipsDown(1.0/0.0)] pair per synonym.
+  List<List<double>> _burstPattern(int count, double motherX) {
+    if (count == 1) return [
+        [0.0, 0.0]
+      ];
+
+    final maxSpread = _screenWidth * 0.42;
+    final leftRoom = motherX - 10.0;
+    final rightRoom = (_screenWidth - 120.0) - motherX;
+    final hasRoomBothSides = leftRoom >= maxSpread && rightRoom >= maxSpread;
+    final side = rightRoom >= leftRoom ? 1.0 : -1.0;
+    final edgeSpread =
+        (leftRoom > rightRoom ? leftRoom : rightRoom).clamp(0.0, maxSpread);
+
+    if (count == 2) {
+      if (hasRoomBothSides) {
+        final s = maxSpread * 0.9;
+        return [
+          [-s, 0.0],
+          [s, 0.0],
+        ];
+      }
+      return [
+        [0.0, 0.0], // stays near mother's spot
+        [side * edgeSpread, 0.0], // shifts to the side with room
+      ];
+    }
+
+    // count == 3
+    if (hasRoomBothSides) {
+      return [
+        [-maxSpread, 0.0], // left, level
+        [0.0, 1.0], // middle, dips down
+        [maxSpread, 0.0], // right, level
+      ];
+    }
+    return [
+      [0.0, 0.0], // stays at mother's spot
+      [0.0, 1.0], // dips straight down
+      [side * edgeSpread, 0.0], // shifts to the open side
+    ];
   }
 
   /// Once a group's active (non-popping) synonym count drops to ≤1,
