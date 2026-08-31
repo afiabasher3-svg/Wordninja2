@@ -4,7 +4,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'mode_selection_screen.dart';
 import 'login_screen.dart';
 import 'word_notes_screen.dart';
+import 'history_screen.dart';
+import 'progress_chart_screen.dart';
 import '../widgets/gradient_button.dart';
+import '../widgets/badge_widget.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -61,21 +64,21 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: _card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Want to exit?',
-            style:
-                TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         content: const Text('Are you sure you want to close the app?',
             style: TextStyle(color: _textSecondary)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Cancel',
-                style: TextStyle(color: _purpleLight, fontWeight: FontWeight.bold)),
+                style: TextStyle(
+                    color: _purpleLight, fontWeight: FontWeight.bold)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Yes',
-                style:
-                    TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -87,6 +90,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final highscore = (_profile?['highscore'] ?? 0) as int;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -155,7 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                           const SizedBox(height: 32),
 
-                          // Ninja logo
+                          // App logo (uploaded image)
                           Center(
                             child: Container(
                               width: 120,
@@ -172,9 +177,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                       spreadRadius: 5)
                                 ],
                               ),
-                              child: const Center(
-                                  child: Text('🥷',
-                                      style: TextStyle(fontSize: 56))),
+                              child: ClipOval(
+                                child: Image.asset(
+                                  'assets/images/playstore.png',
+                                  width: 120,
+                                  height: 120,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -203,8 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceAround,
                               children: [
-                                _statItem('🏆', 'Best Score',
-                                    '${_profile?['highscore'] ?? 0}'),
+                                _statItem('🏆', 'Best Score', '$highscore'),
                                 _divider(),
                                 _statItem('🎯', 'Accuracy',
                                     '${(_profile?['accuracy'] ?? 0.0).toStringAsFixed(1)}%'),
@@ -280,6 +289,33 @@ class _HomeScreenState extends State<HomeScreen> {
                               );
                             },
                           ),
+                          const SizedBox(height: 12),
+
+                          // Result History
+                          GradientButton(
+                            label: 'Result History 📊',
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) => const HistoryScreen()),
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 12),
+
+                          // Accuracy Progress Graph
+                          GradientButton(
+                            label: 'Accuracy Progress 📈',
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) =>
+                                        const ProgressChartScreen()),
+                              );
+                            },
+                          ),
                           const SizedBox(height: 16),
 
                           // How to play
@@ -314,6 +350,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
             ),
+            // Badge — সবসময় home screen-এর কোনায় দেখা যাবে
+            if (!_loading) BadgeCorner(highscore: highscore),
           ],
         ),
       ),
