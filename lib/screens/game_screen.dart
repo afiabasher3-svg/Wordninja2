@@ -257,8 +257,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           // eased toward a fixed target offset — guarantees exact spacing
           // (horizontal) and an exact dip distance (vertical), instead of
           // relying on velocity/friction which barely moved things.
-          final progress =
-              1 - (t.burstTicksRemaining / _burstTotalTicks);
+          final progress = 1 - (t.burstTicksRemaining / _burstTotalTicks);
           final eased = 1 - pow(1 - progress, 3).toDouble(); // easeOutCubic
           t.x = (t.burstStartX + t.burstTargetOffsetX * eased)
               .clamp(10.0, _screenWidth - 120.0);
@@ -441,8 +440,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   // ─── Synonym Pop (mother/burst) mode ─────────────────────────────────
 
-  bool get _hasMotherOnScreen =>
-      tiles.any((t) => t.isMother && !t.isPopping);
+  bool get _hasMotherOnScreen => tiles.any((t) => t.isMother && !t.isPopping);
 
   /// Spawns a single mother balloon. Returns false (no-op) if one is
   /// already on screen, the game isn't active, or no word is available.
@@ -462,7 +460,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (bestX == null) return false; // screen too crowded — try next tick
 
     _groupIdCounter++;
-    final groupId = 'g$_groupIdCounter-${DateTime.now().microsecondsSinceEpoch}';
+    final groupId =
+        'g$_groupIdCounter-${DateTime.now().microsecondsSinceEpoch}';
 
     tiles.add(WordTile(
       word: word,
@@ -530,7 +529,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   ///   them visually separated instead of bunching up.
   /// Returns one [dx, dy] pair per synonym — dy positive = further down.
   List<List<double>> _burstPattern(int count, double motherX) {
-    if (count == 1) return [
+    if (count == 1)
+      return [
         [0.0, 0.0]
       ];
 
@@ -590,8 +590,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     for (final gid in groupIds) {
       if (_motherSpawnedForGroup.contains(gid)) continue;
       final activeInGroup = tiles
-          .where((t) =>
-              t.synonymGroupId == gid && !t.isMother && !t.isPopping)
+          .where((t) => t.synonymGroupId == gid && !t.isMother && !t.isPopping)
           .length;
       if (activeInGroup <= 1) {
         if (_spawnMother()) _motherSpawnedForGroup.add(gid);
@@ -693,7 +692,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     _countdownTimer?.cancel();
 
     await SupabaseService.saveScore(
-        score: score, accuracy: _accuracy, wpm: _wpm);
+        score: score,
+        accuracy: _accuracy,
+        wpm: _wpm,
+        timePlayed: _sessionStopwatch.elapsed.inSeconds);
 
     try {
       if (_sessionWords.isNotEmpty) {
