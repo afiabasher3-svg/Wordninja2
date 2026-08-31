@@ -8,10 +8,20 @@ class SupabaseService {
     required int score,
     required double accuracy,
     required double wpm,
+    required int timePlayed, // seconds
   }) async {
     final user = client.auth.currentUser;
     if (user == null) return;
 
+    // প্রতিটা session আলাদা row হিসেবে save হবে (History + Graph screen এইটা থেকেই ডেটা নেবে)
+    await client.from('game_sessions').insert({
+      'user_id': user.id,
+      'wpm': wpm,
+      'accuracy': accuracy,
+      'time_played': timePlayed,
+    });
+
+    // Highscore হলে profile update হবে (আগের logic অপরিবর্তিত)
     final existing =
         await client.from('profiles').select().eq('id', user.id).single();
 
@@ -22,6 +32,17 @@ class SupabaseService {
         'wpm': wpm,
       }).eq('id', user.id);
     }
+  }
+
+  static Future<List<Map<String, dynamic>>> fetchSessionHistory() async {
+    final user = client.auth.currentUser;
+    if (user == null) return [];
+    final data = await client
+        .from('game_sessions')
+        .select()
+        .eq('user_id', user.id)
+        .order('created_at', ascending: false);
+    return List<Map<String, dynamic>>.from(data);
   }
 
   static Future<Map<String, dynamic>?> getProfile() async {
